@@ -1,22 +1,26 @@
 """Process Tennis motion-capture .npz files into DPPO pretraining format.
 
-Observation vector (D=64) stored as `states`:
+Both states and actions are the full 64-D observation vector so the policy is
+self-contained for autoregressive rollout:
+  states[t]  = obs[t]      — current observation, used as conditioning
+  actions[t] = obs[t+1]    — next observation, the prediction target
+
+Per clip of length T this produces T-1 (state, action) pairs. The 1-frame
+shift means the policy learns to predict the next full observation given the
+current one, including gvec and gyro (root orientation / angular velocity).
+
+Observation layout (D=64):
   [0:3]   gvec_pelvis  — gravity direction in pelvis frame (unit vector)
   [3:6]   gyro_pelvis  — angular velocity in pelvis frame (rad/s)
   [6:35]  joint_pos    — joint angles minus default_qpos[7:] (rad)
   [35:64] joint_vel    — joint velocities finite-diff (rad/s)
 
-Action vector (D=58) stored as `actions`:
-  [0:29]  joint_pos    — same as states[:, 6:35]
-  [29:58] joint_vel    — same as states[:, 35:64]
-
-Both are min-max normalized to [-1, 1] per dimension. Raw min/max are saved
-in normalization.npz for use during RL fine-tuning (the env wrapper needs to
-denormalize policy output back to physical units before passing to the tracker).
+Both are min-max normalized to [-1, 1] per dimension using the same stats.
+Raw min/max are saved in normalization.npz for use during RL fine-tuning.
 
 Outputs written to --out_dir:
-  train.npz          states (N,64), actions (N,58), traj_lengths (C,)
-  normalization.npz  obs_min, obs_max, action_min, action_max (raw, pre-norm)
+  train.npz          states (N,64), actions (N,64), traj_lengths (C,)
+  normalization.npz  obs_min, obs_max, action_min, action_max (identical)
   metadata.json      feature names, freq, provenance
 
 Usage:
@@ -37,7 +41,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 OBS_DIM = 64
-ACT_DIM = 58  # joint_pos (29) + joint_vel (29)
+ACT_DIM = 64  # full next-frame observation
 
 FEATURE_NAMES: list[str] = (
     [f"gvec_{a}" for a in "xyz"]
@@ -136,16 +140,21 @@ def main() -> None:
         all_feats.append(feats)
         print(f"  {path.name:<45}  T={feats.shape[0]:5d}")
 
-    traj_lengths = np.array([f.shape[0] for f in all_feats], dtype=np.int64)
-    concat = np.concatenate(all_feats, axis=0)  # (N, 64)
+    # 1-frame shift per clip: states=obs[t], actions=obs[t+1], length=T-1
+    states_list  = [f[:-1] for f in all_feats]
+    actions_list = [f[1:]  for f in all_feats]
+    traj_lengths = np.array([f.shape[0] for f in states_list], dtype=np.int64)
 
-    obs_min = concat.min(axis=0)  # (64,)
-    obs_max = concat.max(axis=0)  # (64,)
-    action_min = obs_min[6:]       # (58,)
-    action_max = obs_max[6:]       # (58,)
+    states_concat  = np.concatenate(states_list,  axis=0)  # (N, 64)
+    actions_concat = np.concatenate(actions_list, axis=0)  # (N, 64)
 
-    states = minmax_normalize(concat, obs_min, obs_max)
-    actions = minmax_normalize(concat[:, 6:], action_min, action_max)
+    # Same normalization stats for both since they share the same space.
+    all_frames = np.concatenate(all_feats, axis=0)
+    obs_min = all_frames.min(axis=0).astype(np.float32)  # (64,)
+    obs_max = all_frames.max(axis=0).astype(np.float32)  # (64,)
+
+    states  = minmax_normalize(states_concat,  obs_min, obs_max)
+    actions = minmax_normalize(actions_concat, obs_min, obs_max)
 
     np.savez_compressed(
         args.out_dir / "train.npz",
@@ -154,16 +163,16 @@ def main() -> None:
         traj_lengths=traj_lengths,
     )
     print(
-        f"\nSaved train.npz  —  clips={len(all_feats)}  frames={concat.shape[0]:,}  "
+        f"\nSaved train.npz  —  clips={len(all_feats)}  frames={states.shape[0]:,}  "
         f"states={states.shape}  actions={actions.shape}"
     )
 
     np.savez_compressed(
         args.out_dir / "normalization.npz",
-        obs_min=obs_min.astype(np.float32),
-        obs_max=obs_max.astype(np.float32),
-        action_min=action_min.astype(np.float32),
-        action_max=action_max.astype(np.float32),
+        obs_min=obs_min,
+        obs_max=obs_max,
+        action_min=obs_min,  # identical — same observation space
+        action_max=obs_max,
     )
     print("Saved normalization.npz")
 
@@ -174,7 +183,7 @@ def main() -> None:
         ("joint_pos", 6, 35),
         ("joint_vel", 35, 64),
     ]:
-        blk = concat[:, a:b]
+        blk = all_frames[:, a:b]
         print(
             f"  {name:<12}  mean={blk.mean():+7.3f}  std={blk.std():6.3f}  "
             f"[{blk.min():+7.3f}, {blk.max():+7.3f}]"
@@ -185,11 +194,11 @@ def main() -> None:
         "feature_names": FEATURE_NAMES,
         "obs_dim": OBS_DIM,
         "action_dim": ACT_DIM,
-        "action_cols": "obs[:, 6:64] = [joint_pos(29), joint_vel(29)]",
+        "action_cols": "obs[t+1] — full next-frame observation (64-D)",
         "freq_hz": args.freq,
         "normalization": "minmax to [-1, 1] per dimension",
         "n_clips": len(all_feats),
-        "total_frames": int(concat.shape[0]),
+        "total_frames": int(all_frames.shape[0]),
         "sources": [str(p) for p in raw_files],
     }
     (args.out_dir / "metadata.json").write_text(json.dumps(meta, indent=2))

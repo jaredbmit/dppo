@@ -12,11 +12,11 @@ train_dataset_path: data/tennis/train.npz
 
 seed: 42
 device: cuda:0
-obs_dim: 64
-action_dim: 64
+obs_dim: 38
+action_dim: 38
 horizon_steps: 16
 cond_steps: 1
-denoising_steps: 20
+denoising_steps: 100
 
 wandb:
   entity: jaredb-drl
@@ -38,7 +38,7 @@ train:
 model:
   _target_: model.diffusion.diffusion.DiffusionModel
   predict_epsilon: True
-  denoised_clip_value: 1.0
+  denoised_clip_value: null
   network:
     _target_: model.diffusion.mlp_diffusion.DiffusionMLP
     horizon_steps: ${horizon_steps}

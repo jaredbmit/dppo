@@ -1,33 +1,19 @@
 """Process Tennis motion-capture .npz files into DPPO pretraining format.
 
-Both states and actions are the full 64-D observation vector so the policy is
-self-contained for autoregressive rollout:
-  states[t]  = obs[t]      — current observation, used as conditioning
-  actions[t] = obs[t+1]    — next observation, the prediction target
+Extracts 38-D canonical features from raw qpos, z-score normalises per
+dimension, and saves (states, actions, traj_lengths) where actions[t] = obs[t+1].
 
-Per clip of length T this produces T-1 (state, action) pairs. The 1-frame
-shift means the policy learns to predict the next full observation given the
-current one, including gvec and gyro (root orientation / angular velocity).
-
-Observation layout (D=64):
+Feature layout (D=38):
   [0:3]   gvec_pelvis  — gravity direction in pelvis frame (unit vector)
   [3:6]   gyro_pelvis  — angular velocity in pelvis frame (rad/s)
   [6:35]  joint_pos    — joint angles minus default_qpos[7:] (rad)
-  [35:64] joint_vel    — joint velocities finite-diff (rad/s)
-
-Both are min-max normalized to [-1, 1] per dimension using the same stats.
-Raw min/max are saved in normalization.npz for use during RL fine-tuning.
+  [35]    root_height  — base z position (m)
+  [36:38] root_vel_xy  — planar velocity in heading frame (m/s)
 
 Outputs written to --out_dir:
-  train.npz          states (N,64), actions (N,64), traj_lengths (C,)
-  normalization.npz  obs_min, obs_max, action_min, action_max (identical)
-  metadata.json      feature names, freq, provenance
-
-Usage:
-  python script/dataset/process_tennis_dataset.py \\
-      --raw_root storage/data/mocap/Tennis \\
-      --xml_path /path/to/g1.xml \\
-      --out_dir  data/tennis
+  train.npz       states (N,38), actions (N,38), traj_lengths (C,)
+  norm_stats.npz  mean (38,), std (38,)
+  metadata.json   feature names, freq, provenance
 """
 
 from __future__ import annotations
@@ -40,19 +26,24 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-OBS_DIM = 64
-ACT_DIM = 64  # full next-frame observation
+RAW_ROOT = Path("/home/jared/drl/LATENT/storage/data/mocap/Tennis")
+XML_PATH = Path("/home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml")
+
+OBS_DIM = 38
+ACT_DIM = 38
 
 FEATURE_NAMES: list[str] = (
     [f"gvec_{a}" for a in "xyz"]
     + [f"gyro_{a}" for a in "xyz"]
     + [f"jpos_{i}" for i in range(29)]
-    + [f"jvel_{i}" for i in range(29)]
+    + ["root_height"]
+    + ["root_vel_x_heading", "root_vel_y_heading"]
 )
+assert len(FEATURE_NAMES) == OBS_DIM
 
 
-def _load_default_qpos(xml_path: str) -> np.ndarray:
-    m = mujoco.MjModel.from_xml_path(xml_path)
+def _load_default_qpos(xml_path: Path) -> np.ndarray:
+    m = mujoco.MjModel.from_xml_path(str(xml_path))
     kid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "home")
     if kid < 0:
         raise RuntimeError("No keyframe named 'home' in G1 XML")
@@ -73,8 +64,14 @@ def _angular_velocity_local(R: Rotation, freq: float) -> np.ndarray:
     return omega
 
 
+def _heading_yaw(R: Rotation) -> np.ndarray:
+    """Yaw of the heading (yaw-only) frame from body x-axis in world. (T,)."""
+    fwd = R.apply(np.array([1.0, 0.0, 0.0]))   # (T, 3)
+    return np.arctan2(fwd[:, 1], fwd[:, 0])
+
+
 def extract_features(path: Path, default_qpos: np.ndarray, freq: float) -> np.ndarray:
-    """Return (T, 64) float32 observation array for one motion clip."""
+    """Return (T, 38) float32 observation array for one motion clip."""
     d = np.load(path, allow_pickle=True)
     qpos = np.asarray(d["qpos"], dtype=np.float64)  # (T, 36)
     T = qpos.shape[0]
@@ -86,36 +83,41 @@ def extract_features(path: Path, default_qpos: np.ndarray, freq: float) -> np.nd
         np.broadcast_to([0.0, 0.0, -1.0], (T, 3)).copy()
     ).astype(np.float32)
 
-    gyro = _angular_velocity_local(R_root, freq)  # (T, 3) rad/s in pelvis frame
+    angvel_root = _angular_velocity_local(R_root, freq)
+    gyro = angvel_root.astype(np.float32)
 
     joint_pos = (joint_ang - default_qpos).astype(np.float32)
 
-    joint_ang_u = np.unwrap(joint_ang, axis=0)
-    jvel_raw = np.empty_like(joint_ang)
-    jvel_raw[:-1] = (joint_ang_u[1:] - joint_ang_u[:-1]) * freq
-    jvel_raw[-1] = jvel_raw[-2]
-    joint_vel = jvel_raw.astype(np.float32)
+    root_height = qpos[:, 2:3].astype(np.float32)
 
-    feats = np.concatenate([gvec, gyro, joint_pos, joint_vel], axis=1)
+    root_xy = qpos[:, 0:2]
+    vel_xy = np.empty_like(root_xy)
+    vel_xy[:-1] = (root_xy[1:] - root_xy[:-1]) * freq
+    vel_xy[-1] = vel_xy[-2]
+    yaw = _heading_yaw(R_root)
+    cos, sin = np.cos(yaw), np.sin(yaw)
+    vx_h =  cos * vel_xy[:, 0] + sin * vel_xy[:, 1]
+    vy_h = -sin * vel_xy[:, 0] + cos * vel_xy[:, 1]
+    root_vel_h = np.stack([vx_h, vy_h], axis=1).astype(np.float32)
+
+    feats = np.concatenate([gvec, gyro, joint_pos, root_height, root_vel_h], axis=1)
     assert feats.shape == (T, OBS_DIM), f"Shape mismatch: {feats.shape}"
     return feats
 
 
-def minmax_normalize(
-    x: np.ndarray, x_min: np.ndarray, x_max: np.ndarray
+def zscore_normalize(
+    x: np.ndarray, mean: np.ndarray, std: np.ndarray
 ) -> np.ndarray:
-    return (2.0 * (x - x_min) / np.maximum(x_max - x_min, 1e-6) - 1.0).astype(
-        np.float32
-    )
+    return ((x - mean) / std).astype(np.float32)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--raw_root", type=Path, required=True,
+    ap.add_argument("--raw_root", type=Path, default=RAW_ROOT,
                     help="Directory containing raw MoCap .npz files")
-    ap.add_argument("--xml_path", type=str, required=True,
+    ap.add_argument("--xml_path", type=Path, default=XML_PATH,
                     help="Path to G1 MuJoCo XML (for default_qpos keyframe)")
     ap.add_argument("--out_dir", type=Path, default=Path("data/tennis"))
     ap.add_argument("--freq", type=float, default=50.0,
@@ -140,21 +142,17 @@ def main() -> None:
         all_feats.append(feats)
         print(f"  {path.name:<45}  T={feats.shape[0]:5d}")
 
-    # 1-frame shift per clip: states=obs[t], actions=obs[t+1], length=T-1
-    states_list  = [f[:-1] for f in all_feats]
-    actions_list = [f[1:]  for f in all_feats]
-    traj_lengths = np.array([f.shape[0] for f in states_list], dtype=np.int64)
-
-    states_concat  = np.concatenate(states_list,  axis=0)  # (N, 64)
-    actions_concat = np.concatenate(actions_list, axis=0)  # (N, 64)
-
-    # Same normalization stats for both since they share the same space.
     all_frames = np.concatenate(all_feats, axis=0)
-    obs_min = all_frames.min(axis=0).astype(np.float32)  # (64,)
-    obs_max = all_frames.max(axis=0).astype(np.float32)  # (64,)
+    mean = all_frames.mean(axis=0).astype(np.float32)
+    std  = np.clip(all_frames.std(axis=0), 1e-6, None).astype(np.float32)
 
-    states  = minmax_normalize(states_concat,  obs_min, obs_max)
-    actions = minmax_normalize(actions_concat, obs_min, obs_max)
+    # 1-frame shift: states=obs[t], actions=obs[t+1] (both 38-D)
+    states_list  = [zscore_normalize(f[:-1], mean, std) for f in all_feats]
+    actions_list = [zscore_normalize(f[1:],  mean, std) for f in all_feats]
+    traj_lengths = np.array([f.shape[0] - 1 for f in all_feats], dtype=np.int64)
+
+    states  = np.concatenate(states_list,  axis=0)  # (N, 38)
+    actions = np.concatenate(actions_list, axis=0)  # (N, 38)
 
     np.savez_compressed(
         args.out_dir / "train.npz",
@@ -168,20 +166,19 @@ def main() -> None:
     )
 
     np.savez_compressed(
-        args.out_dir / "normalization.npz",
-        obs_min=obs_min,
-        obs_max=obs_max,
-        action_min=obs_min,  # identical — same observation space
-        action_max=obs_max,
+        args.out_dir / "norm_stats.npz",
+        mean=mean,
+        std=std,
     )
-    print("Saved normalization.npz")
+    print("Saved norm_stats.npz")
 
     print("\n--- Feature ranges (pre-normalization) ---")
     for name, a, b in [
-        ("gvec",      0,  3),
-        ("gyro",      3,  6),
-        ("joint_pos", 6, 35),
-        ("joint_vel", 35, 64),
+        ("gvec",        0,  3),
+        ("gyro",        3,  6),
+        ("joint_pos",   6, 35),
+        ("root_height", 35, 36),
+        ("root_vel_xy", 36, 38),
     ]:
         blk = all_frames[:, a:b]
         print(
@@ -194,9 +191,9 @@ def main() -> None:
         "feature_names": FEATURE_NAMES,
         "obs_dim": OBS_DIM,
         "action_dim": ACT_DIM,
-        "action_cols": "obs[t+1] — full next-frame observation (64-D)",
+        "action_cols": "obs[t+1] — full 38-D canonical features",
         "freq_hz": args.freq,
-        "normalization": "minmax to [-1, 1] per dimension",
+        "normalization": "z-score (zero mean, unit std) per dimension",
         "n_clips": len(all_feats),
         "total_frames": int(all_frames.shape[0]),
         "sources": [str(p) for p in raw_files],

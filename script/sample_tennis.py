@@ -1,28 +1,25 @@
 """Sample from a pre-trained tennis diffusion policy checkpoint.
 
-The policy predicts the full 64-D next observation (including gvec and gyro),
-so autoregressive rollout is exact. Re-planning happens every T_p steps.
-Supports arbitrary --cond_steps: a rolling buffer of the last N frames is
-maintained and passed as conditioning. Episodes are padded with the seed frame
-at the start, matching the training dataset behaviour.
+The policy predicts the full 38-D next observation, so autoregressive rollout
+feeds the last predicted frame back as the next conditioning input.
+Re-planning happens every horizon_steps frames.
 
 Three output modes (all saved to --out_dir):
 
   chunks.npz
     N independently sampled next-obs chunks conditioned on random dataset
-    frames.  Shape: (n_chunks, T_p, 64) unnormalized.
+    frames.  Shape: (n_chunks, T_p, 38) unnormalized.
 
   teacher_forced.npz
     Long rollout conditioned on ground-truth dataset states every T_p steps.
-    Shape: (T, 64) actions, (T, 64) gt_states, unnormalized.
+    Shape: (T, 38) actions, (T, 38) gt_states, unnormalized.
 
   autoregressive.npz
     Long rollout where the last predicted frame is fed back as the next
-    conditioning input (with a rolling buffer of depth cond_steps).
-    Shape: (T, 64) actions, unnormalized.
+    conditioning input.
+    Shape: (T, 38) actions, unnormalized.
 
-All outputs are in physical units, i.e. min-max normalization inverted via
-normalization.npz.
+All outputs are in physical (unnormalized) units.
 
 Usage:
   python script/sample_tennis.py \\
@@ -40,25 +37,35 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
 from model.diffusion.diffusion import DiffusionModel
 from model.diffusion.mlp_diffusion import DiffusionMLP
 from agent.dataset.sequence import StitchedSequenceDataset
 
-HORIZON_STEPS = 16
-DENOISING_STEPS = 20
-OBS_DIM = 64
+OBS_DIM = 38
+FREQ = 50.0
+
+
+def load_run_cfg(checkpoint_path: str) -> dict:
+    """Load .hydra/config.yaml from the run directory containing this checkpoint."""
+    cfg_path = Path(checkpoint_path).parent.parent / ".hydra" / "config.yaml"
+    if not cfg_path.exists():
+        return {}
+    with open(cfg_path) as f:
+        return yaml.safe_load(f)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_model(checkpoint_path: str, cond_steps: int, device: str) -> DiffusionModel:
+def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action_dim: int, denoising_steps: int, device: str) -> DiffusionModel:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    sd = ckpt.get("ema", ckpt.get("model"))
     network = DiffusionMLP(
-        action_dim=OBS_DIM,
-        horizon_steps=HORIZON_STEPS,
+        action_dim=action_dim,
+        horizon_steps=horizon_steps,
         cond_dim=OBS_DIM * cond_steps,
         time_dim=16,
         mlp_dims=[512, 512, 512],
@@ -69,31 +76,34 @@ def load_model(checkpoint_path: str, cond_steps: int, device: str) -> DiffusionM
     )
     model = DiffusionModel(
         network=network,
-        horizon_steps=HORIZON_STEPS,
+        horizon_steps=horizon_steps,
         obs_dim=OBS_DIM,
-        action_dim=OBS_DIM,
-        denoising_steps=DENOISING_STEPS,
+        action_dim=action_dim,
+        denoising_steps=denoising_steps,
         predict_epsilon=True,
-        denoised_clip_value=1.0,
+        denoised_clip_value=None,
         device=device,
     )
-    state_dict = ckpt.get("ema", ckpt.get("model"))
-    model.load_state_dict(state_dict)
+    model.load_state_dict(sd)
     model.eval()
     return model
 
 
-def load_norm_stats(data_dir: Path):
-    n = np.load(data_dir / "normalization.npz")
-    return n["obs_min"], n["obs_max"]
+def load_norm_stats(data_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    n = np.load(data_dir / "norm_stats.npz")
+    return n["mean"], n["std"]
 
 
-def denorm(x: np.ndarray, x_min: np.ndarray, x_max: np.ndarray) -> np.ndarray:
-    return ((x + 1.0) / 2.0) * (x_max - x_min) + x_min
+def denorm(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    return x * std + mean
+
+
+def norm(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    return (x - mean) / std
 
 
 def get_clip_states(dataset: StitchedSequenceDataset, clip_idx: int) -> torch.Tensor:
-    """Return all normalized states for one clip, shape (T, 64)."""
+    """Return all normalized states for one clip, shape (T, 38)."""
     lengths = np.load(dataset.dataset_path, allow_pickle=False)["traj_lengths"]
     start = int(np.sum(lengths[:clip_idx]))
     end = start + int(lengths[clip_idx])
@@ -101,9 +111,9 @@ def get_clip_states(dataset: StitchedSequenceDataset, clip_idx: int) -> torch.Te
 
 
 def make_buffer(frames: deque, cond_steps: int, device: str) -> torch.Tensor:
-    """Build (1, cond_steps, 64) conditioning tensor from a rolling frame buffer."""
+    """Build (1, cond_steps, 38) conditioning tensor from a rolling frame buffer."""
     assert len(frames) == cond_steps
-    return torch.stack(list(frames)).unsqueeze(0).to(device)  # (1, N, 64)
+    return torch.stack(list(frames)).unsqueeze(0).to(device)
 
 
 def seed_buffer(seed_frame: torch.Tensor, cond_steps: int) -> deque:
@@ -113,10 +123,10 @@ def seed_buffer(seed_frame: torch.Tensor, cond_steps: int) -> deque:
 
 @torch.no_grad()
 def sample_chunk(model: DiffusionModel, buffer: deque, cond_steps: int, device: str) -> np.ndarray:
-    """Run one diffusion forward pass. Returns (T_p, 64) numpy, normalized."""
+    """Run one diffusion forward pass. Returns (T_p, ACT_DIM) numpy, normalized."""
     cond = {"state": make_buffer(buffer, cond_steps, device)}
-    out = model(cond=cond, deterministic=False)
-    return out.trajectories.squeeze(0).cpu().numpy()  # (T_p, 64)
+    out = model(cond=cond)
+    return out.trajectories.squeeze(0).cpu().numpy()  # (T_p, ACT_DIM)
 
 
 # ---------------------------------------------------------------------------
@@ -129,20 +139,19 @@ def sample_random_chunks(
     n_chunks: int,
     cond_steps: int,
     device: str,
-    obs_min: np.ndarray,
-    obs_max: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
 ) -> dict:
     indices = np.random.randint(0, len(dataset.states), size=n_chunks)
     chunks, cond_states = [], []
     for idx in indices:
-        # Seed buffer with the chosen frame (no true history available for random samples).
         buf = seed_buffer(dataset.states[idx], cond_steps)
         chunk = sample_chunk(model, buf, cond_steps, device)
-        chunks.append(denorm(chunk, obs_min, obs_max))
-        cond_states.append(denorm(dataset.states[idx].cpu().numpy(), obs_min, obs_max))
+        chunks.append(denorm(chunk, mean, std))
+        cond_states.append(denorm(dataset.states[idx].cpu().numpy(), mean, std))
     return {
-        "actions": np.stack(chunks),          # (n_chunks, T_p, 64)
-        "cond_states": np.stack(cond_states), # (n_chunks, 64)
+        "actions": np.stack(chunks),           # (n_chunks, T_p, 38)
+        "cond_states": np.stack(cond_states),  # (n_chunks, 38)
     }
 
 
@@ -151,28 +160,26 @@ def sample_teacher_forced(
     clip_states: torch.Tensor,
     rollout_steps: int,
     cond_steps: int,
+    horizon_steps: int,
     device: str,
-    obs_min: np.ndarray,
-    obs_max: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
 ) -> dict:
-    T = min(rollout_steps, len(clip_states) - HORIZON_STEPS)
+    T = min(rollout_steps, len(clip_states) - horizon_steps)
     all_actions, all_gt_states = [], []
     t = 0
-    while t + HORIZON_STEPS <= T:
-        # Build buffer from GT frames, padding with frame 0 before episode start.
+    while t + horizon_steps <= T:
         buf = deque(
             [clip_states[max(0, t - i)] for i in reversed(range(cond_steps))],
             maxlen=cond_steps,
         )
         chunk = sample_chunk(model, buf, cond_steps, device)
-        all_actions.append(denorm(chunk, obs_min, obs_max))
-        all_gt_states.append(
-            denorm(clip_states[t:t + HORIZON_STEPS].cpu().numpy(), obs_min, obs_max)
-        )
-        t += HORIZON_STEPS
+        all_actions.append(denorm(chunk, mean, std))
+        all_gt_states.append(denorm(clip_states[t:t + horizon_steps].cpu().numpy(), mean, std))
+        t += horizon_steps
     return {
-        "actions": np.concatenate(all_actions, axis=0),      # (T, 64)
-        "gt_states": np.concatenate(all_gt_states, axis=0),  # (T, 64)
+        "actions": np.concatenate(all_actions, axis=0),
+        "gt_states": np.concatenate(all_gt_states, axis=0),
     }
 
 
@@ -181,21 +188,21 @@ def sample_autoregressive(
     clip_states: torch.Tensor,
     rollout_steps: int,
     cond_steps: int,
+    horizon_steps: int,
     device: str,
-    obs_min: np.ndarray,
-    obs_max: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
 ) -> dict:
     buf = seed_buffer(clip_states[0], cond_steps)
     all_actions = []
     t = 0
     while t < rollout_steps:
-        chunk = sample_chunk(model, buf, cond_steps, device)  # (T_p, 64) normalized
-        all_actions.append(denorm(chunk, obs_min, obs_max))
-        # Shift last predicted frame into the rolling buffer.
-        buf.append(torch.from_numpy(chunk[-1]).float().to(clip_states.device))
-        t += HORIZON_STEPS
+        chunk = sample_chunk(model, buf, cond_steps, device)  # (T_p, 38) normalized
+        all_actions.append(denorm(chunk, mean, std))
+        buf.append(torch.from_numpy(chunk[-1].astype(np.float32)).to(clip_states.device))
+        t += horizon_steps
     return {
-        "actions": np.concatenate(all_actions, axis=0),  # (T, 64)
+        "actions": np.concatenate(all_actions, axis=0),
     }
 
 
@@ -208,10 +215,14 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--checkpoint", type=str, required=True)
-    ap.add_argument("--cond_steps", type=int, default=1,
-                    help="Must match the cond_steps used during training")
+    ap.add_argument("--cond_steps", type=int, default=None,
+                    help="Defaults to value from training config")
+    ap.add_argument("--horizon_steps", type=int, default=None,
+                    help="Defaults to value from training config")
+    ap.add_argument("--denoising_steps", type=int, default=None,
+                    help="Defaults to value from training config")
     ap.add_argument("--data_dir", type=Path, default=Path("data/tennis"))
-    ap.add_argument("--out_dir", type=Path, default=Path("data/tennis/samples"))
+    ap.add_argument("--out_dir", type=Path, default=None)
     ap.add_argument("--clip_idx", type=int, default=0)
     ap.add_argument("--n_chunks", type=int, default=64)
     ap.add_argument("--rollout_steps", type=int, default=400)
@@ -219,43 +230,47 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
+    cfg = load_run_cfg(args.checkpoint)
+    cond_steps      = args.cond_steps      or cfg.get("cond_steps",      1)
+    horizon_steps   = args.horizon_steps   or cfg.get("horizon_steps",   16)
+    denoising_steps = args.denoising_steps or cfg.get("denoising_steps", 100)
+
+    if args.out_dir is None:
+        args.out_dir = Path(args.checkpoint).parent.parent / "samples"
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading model (cond_steps={args.cond_steps})...")
-    model = load_model(args.checkpoint, args.cond_steps, args.device)
+    mean, std = load_norm_stats(args.data_dir)
+    action_dim = len(mean)
+
+    print(f"Loading model (cond_steps={cond_steps}, horizon_steps={horizon_steps}, action_dim={action_dim}, denoising_steps={denoising_steps})...")
+    model = load_model(args.checkpoint, cond_steps, horizon_steps, action_dim, denoising_steps, args.device)
 
     print("Loading dataset...")
     dataset = StitchedSequenceDataset(
         dataset_path=str(args.data_dir / "train.npz"),
-        horizon_steps=HORIZON_STEPS,
-        cond_steps=args.cond_steps,
+        horizon_steps=horizon_steps,
+        cond_steps=cond_steps,
         device=args.device,
     )
-    obs_min, obs_max = load_norm_stats(args.data_dir)
 
     clip_states = get_clip_states(dataset, args.clip_idx)
     print(f"Clip {args.clip_idx}: {len(clip_states)} frames")
 
     print(f"\nSampling {args.n_chunks} random chunks...")
-    chunks = sample_random_chunks(
-        model, dataset, args.n_chunks, args.cond_steps, args.device, obs_min, obs_max
-    )
+    chunks = sample_random_chunks(model, dataset, args.n_chunks, cond_steps, args.device, mean, std)
     np.savez_compressed(args.out_dir / "chunks.npz", **chunks)
     print(f"  actions: {chunks['actions'].shape}")
 
     print(f"\nSampling teacher-forced rollout ({args.rollout_steps} steps)...")
-    tf = sample_teacher_forced(
-        model, clip_states, args.rollout_steps, args.cond_steps, args.device, obs_min, obs_max
-    )
+    tf = sample_teacher_forced(model, clip_states, args.rollout_steps, cond_steps, horizon_steps, args.device, mean, std)
     np.savez_compressed(args.out_dir / "teacher_forced.npz", **tf)
     print(f"  actions: {tf['actions'].shape}  gt_states: {tf['gt_states'].shape}")
 
     print(f"\nSampling autoregressive rollout ({args.rollout_steps} steps)...")
-    ar = sample_autoregressive(
-        model, clip_states, args.rollout_steps, args.cond_steps, args.device, obs_min, obs_max
-    )
+    ar = sample_autoregressive(model, clip_states, args.rollout_steps, cond_steps, horizon_steps, args.device, mean, std)
     np.savez_compressed(args.out_dir / "autoregressive.npz", **ar)
     print(f"  actions: {ar['actions'].shape}")
 

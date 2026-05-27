@@ -14,7 +14,7 @@ seed: 42
 device: cuda:0
 obs_dim: 38
 action_dim: 38
-horizon_steps: 16
+horizon_steps: 50
 cond_steps: 1
 denoising_steps: 100
 
@@ -26,26 +26,33 @@ wandb:
 train:
   n_epochs: 2000
   batch_size: 256
-  learning_rate: 1e-3
-  weight_decay: 1e-6
+  learning_rate: 1e-4
+  weight_decay: 0.0
   lr_scheduler:
     first_cycle_steps: 2000
-    warmup_steps: 10
-    min_lr: 1e-4
-  save_model_freq: 500
-  log_freq: 10
+    warmup_steps: 0
+    min_lr: 1e-6
+  update_ema_freq: 1
+  save_model_freq: 5000
+  log_freq: 100
 
 model:
   _target_: model.diffusion.diffusion.DiffusionModel
-  predict_epsilon: True
+  predict_epsilon: False
   denoised_clip_value: null
+  aux_loss_fn:
+    _target_: model.diffusion.auxiliary_loss.TennisGeometricLoss
+    xml_path: /home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml
+    norm_stats_path: data/tennis/norm_stats.npz
+    lambda_ee_pos: 1.0
+    lambda_joint_vel: 1.0
   network:
     _target_: model.diffusion.mlp_diffusion.DiffusionMLP
     horizon_steps: ${horizon_steps}
     action_dim: ${action_dim}
     cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
-    time_dim: 16
-    mlp_dims: [512, 512, 512]
+    time_dim: 64
+    mlp_dims: [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
     activation_type: ReLU
     out_activation_type: Identity
     use_layernorm: False
@@ -57,7 +64,7 @@ model:
   device: ${device}
 
 ema:
-  decay: 0.995
+  decay: 0.999
 
 train_dataset:
   _target_: agent.dataset.sequence.StitchedSequenceDataset

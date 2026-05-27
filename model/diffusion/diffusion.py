@@ -48,6 +48,8 @@ class DiffusionModel(nn.Module):
         use_ddim=False,
         ddim_discretize="uniform",
         ddim_steps=None,
+        # Auxiliary losses (x0-prediction mode only)
+        aux_loss_fn=None,
         **kwargs,
     ):
         super().__init__()
@@ -72,6 +74,9 @@ class DiffusionModel(nn.Module):
         # Clip epsilon for numerical stability
         self.eps_clip_value = eps_clip_value
 
+        # Optional auxiliary loss module (e.g. geometric losses for tennis)
+        self.aux_loss_fn = aux_loss_fn.to(device) if aux_loss_fn is not None else None
+
         # Set up models
         self.network = network.to(device)
         if network_path is not None:
@@ -84,9 +89,9 @@ class DiffusionModel(nn.Module):
             else:
                 self.load_state_dict(checkpoint["model"], strict=False)
                 logging.info("Loaded RL-trained policy from %s", network_path)
-        logging.info(
-            f"Number of network parameters: {sum(p.numel() for p in self.parameters())}"
-        )
+        n_params = sum(p.numel() for p in self.parameters())
+        logging.info(f"Number of network parameters: {n_params}")
+        print(f"DiffusionModel parameters: {n_params:,}")
 
         """
         DDPM parameters
@@ -344,9 +349,16 @@ class DiffusionModel(nn.Module):
         # Predict
         x_recon = self.network(x_noisy, t, cond=cond)
         if self.predict_epsilon:
-            return F.mse_loss(x_recon, noise, reduction="mean")
+            loss = F.mse_loss(x_recon, noise, reduction="mean")
         else:
-            return F.mse_loss(x_recon, x_start, reduction="mean")
+            loss = F.mse_loss(x_recon, x_start, reduction="mean")
+
+        aux = {}
+        if not self.predict_epsilon and self.aux_loss_fn is not None:
+            aux = self.aux_loss_fn(x_recon, x_start)
+            for v in aux.values():
+                loss = loss + v
+        return loss, aux
 
     def q_sample(self, x_start, t, noise=None):
         """

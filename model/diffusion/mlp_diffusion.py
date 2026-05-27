@@ -198,6 +198,7 @@ class DiffusionMLP(nn.Module):
             model = ResidualMLP
         else:
             model = MLP
+        self.cond_dim = cond_dim
         if cond_mlp_dims is not None:
             self.cond_mlp = MLP(
                 [cond_dim] + cond_mlp_dims,
@@ -233,17 +234,16 @@ class DiffusionMLP(nn.Module):
         # flatten chunk
         x = x.view(B, -1)
 
-        # flatten history
-        state = cond["state"].view(B, -1)
-
-        # obs encoder
-        if hasattr(self, "cond_mlp"):
-            state = self.cond_mlp(state)
-
         # append time and cond
         time = time.view(B, 1)
         time_emb = self.time_embedding(time).view(B, self.time_dim)
-        x = torch.cat([x, time_emb, state], dim=-1)
+        parts = [x, time_emb]
+        if self.cond_dim > 0:
+            state = cond["state"].view(B, -1)
+            if hasattr(self, "cond_mlp"):
+                state = self.cond_mlp(state)
+            parts.append(state)
+        x = torch.cat(parts, dim=-1)
 
         # mlp head
         out = self.mlp_mean(x)

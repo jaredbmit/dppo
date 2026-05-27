@@ -26,14 +26,17 @@ class TrainDiffusionAgent(PreTrainAgent):
 
             # train
             loss_train_epoch = []
+            aux_train_epoch = {}
             for batch_train in self.dataloader_train:
                 if self.dataset_train.device == "cpu":
                     batch_train = batch_to_device(batch_train)
 
                 self.model.train()
-                loss_train = self.model.loss(*batch_train)
+                loss_train, aux_train = self.model.loss(*batch_train)
                 loss_train.backward()
                 loss_train_epoch.append(loss_train.item())
+                for k, v in aux_train.items():
+                    aux_train_epoch.setdefault(k, []).append(v.item())
 
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -43,6 +46,7 @@ class TrainDiffusionAgent(PreTrainAgent):
                     self.step_ema()
                 cnt_batch += 1
             loss_train = np.mean(loss_train_epoch)
+            aux_train_mean = {k: np.mean(v) for k, v in aux_train_epoch.items()}
 
             # validate
             loss_val_epoch = []
@@ -76,6 +80,7 @@ class TrainDiffusionAgent(PreTrainAgent):
                     wandb.log(
                         {
                             "loss - train": loss_train,
+                            **{f"loss - {k}": v for k, v in aux_train_mean.items()},
                         },
                         step=self.epoch,
                         commit=True,

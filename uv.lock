@@ -34,6 +34,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/3e/38/7859ff46355f76f8d19459005ca000b6e7012f2f1ca597746cbcd1fbfe5e/antlr4-python3-runtime-4.9.3.tar.gz", hash = "sha256:f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b", size = 117034, upload-time = "2021-11-06T17:52:23.524Z" }
 
 [[package]]
+name = "arm-pytorch-utilities"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pytorch-seed" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ae/a6/3772e05ecf17a4b587710d455a93e11a8ac200405a2eef842323a7488d06/arm_pytorch_utilities-0.5.0.tar.gz", hash = "sha256:af0733ffc0a22b5cc7b6d97e637164714fd2ed415f5febd8e42efd83e743278e", size = 41344, upload-time = "2026-03-10T22:03:59.39Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/35/4398bc89c8f1f398d893b3fcc81a8ede0da7bfa8be5ad070874689219d71/arm_pytorch_utilities-0.5.0-py3-none-any.whl", hash = "sha256:9942c7bf4c1040b3d97e53d178f96b4562b2f28cce6dc3955ca1d3e13ea5c137", size = 41061, upload-time = "2026-03-10T22:03:58.097Z" },
+]
+
+[[package]]
 name = "asttokens"
 version = "3.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -835,6 +853,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "omegaconf" },
     { name = "pretty-errors" },
+    { name = "pytorch-kinematics" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "torch" },
@@ -926,6 +945,7 @@ requires-dist = [
     { name = "pin", marker = "extra == 'all'" },
     { name = "pin", marker = "extra == 'd3il'" },
     { name = "pretty-errors" },
+    { name = "pytorch-kinematics" },
     { name = "robomimic", marker = "extra == 'all'", git = "https://github.com/ARISE-Initiative/robomimic.git" },
     { name = "robomimic", marker = "extra == 'robomimic'", git = "https://github.com/ARISE-Initiative/robomimic.git" },
     { name = "robosuite", marker = "extra == 'all'", git = "https://github.com/ARISE-Initiative/robosuite.git?rev=v1.4.1" },
@@ -3095,6 +3115,40 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/86/f5/8c0653e5bb54e0cbdfe27bf32d41f27bc4e12faa8742778c17f2a71be2c0/python-xlib-0.33.tar.gz", hash = "sha256:55af7906a2c75ce6cb280a584776080602444f75815a7aff4d287bb2d7018b32", size = 269068, upload-time = "2022-12-25T18:53:00.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl", hash = "sha256:c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398", size = 182185, upload-time = "2022-12-25T18:52:58.662Z" },
+]
+
+[[package]]
+name = "pytorch-kinematics"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "arm-pytorch-utilities" },
+    { name = "lxml" },
+    { name = "matplotlib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pytorch-seed" },
+    { name = "pyyaml" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/67/63/955ac12596b40dffe4fb33b4e02dad66cbc7322370c2e7567bff2fdff66a/pytorch_kinematics-0.10.0.tar.gz", hash = "sha256:064eef64da3a3b7d8d21bc29721090cf40800123e9432ec5b899398eb89cd396", size = 80978, upload-time = "2026-04-15T23:24:20.153Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/e9/8b73dd73d929fcf6eab945af0f093c5517e8260d2fe3fc83279f4d876daa/pytorch_kinematics-0.10.0-py3-none-any.whl", hash = "sha256:62f78fecd60b29421bbab8854bcbb0704389b25058e33fc45d17b46e4b1b6788", size = 68483, upload-time = "2026-04-15T23:24:18.897Z" },
+]
+
+[[package]]
+name = "pytorch-seed"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/b5/7d1b68e7eaf16411c3e0e2707e6b0e4ff053f9765deb72a70279fd54d0a5/pytorch_seed-0.2.0.tar.gz", hash = "sha256:096edd3404f8a00f3df2bab41024945806baf1f64b05678c82373b780458e1a3", size = 5234, upload-time = "2023-02-15T18:34:28.759Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/7b/6e29f8600d0df90ffce98850130e5ac993e1e29101fa655e38f6c0f60393/pytorch_seed-0.2.0-py3-none-any.whl", hash = "sha256:50a1ee2f62e55f88c20069849aa12265a007aeaea6893f3d23ad4e40173c5c89", size = 4201, upload-time = "2023-02-15T18:34:27.098Z" },
 ]
 
 [[package]]

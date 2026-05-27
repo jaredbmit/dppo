@@ -20,8 +20,9 @@ dependencies = [
     "tqdm",
     "pretty_errors",
     "matplotlib",
-    # preprocessing
+    # preprocessing / kinematics
     "mujoco>=3.1.6",
+    "pytorch-kinematics",
     "scipy",
     "numpy",
     "gdown>=6.0.0",

@@ -32,7 +32,11 @@ class TrainDiffusionAgent(PreTrainAgent):
                     batch_train = batch_to_device(batch_train)
 
                 self.model.train()
-                loss_train, aux_train = self.model.loss(*batch_train)
+                x, cond = batch_train.actions, batch_train.conditions
+                if self.goal_conditioner is not None:
+                    self.goal_conditioner.train()
+                    cond = self.goal_conditioner(x, cond)
+                loss_train, aux_train = self.model.loss(x, cond)
                 loss_train.backward()
                 loss_train_epoch.append(loss_train.item())
                 for k, v in aux_train.items():
@@ -55,7 +59,11 @@ class TrainDiffusionAgent(PreTrainAgent):
                 for batch_val in self.dataloader_val:
                     if self.dataset_val.device == "cpu":
                         batch_val = batch_to_device(batch_val)
-                    loss_val, infos_val = self.model.loss(*batch_val)
+                    x_val, cond_val = batch_val.actions, batch_val.conditions
+                    if self.goal_conditioner is not None:
+                        self.goal_conditioner.eval()
+                        cond_val = self.goal_conditioner(x_val, cond_val)
+                    loss_val, _ = self.model.loss(x_val, cond_val)
                     loss_val_epoch.append(loss_val.item())
                 self.model.train()
             loss_val = np.mean(loss_val_epoch) if len(loss_val_epoch) > 0 else None

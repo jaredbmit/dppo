@@ -1,0 +1,82 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+
+_target_: agent.pretrain.train_diffusion_agent.TrainDiffusionAgent
+
+name: tennis_pre_diffusion_mlp_goal_ta${horizon_steps}_td${denoising_steps}
+logdir: log/tennis-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: data/tennis/train.npz
+
+seed: 42
+device: cuda:0
+obs_dim: 38
+action_dim: 38
+goal_dim: 2
+horizon_steps: 50
+cond_steps: 1
+denoising_steps: 100
+
+wandb:
+  entity: jaredb-drl
+  project: tennis-pretrain
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_epochs: 2000
+  batch_size: 256
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  lr_scheduler:
+    first_cycle_steps: 2000
+    warmup_steps: 0
+    min_lr: 1e-6
+  update_ema_freq: 1
+  save_model_freq: 500
+  log_freq: 100
+
+goal_conditioner:
+  _target_: model.common.goal.TennisXYGoalConditioner
+  norm_stats_path: data/tennis/norm_stats.npz
+  noise_std: 0.1
+  freq: 50.0
+
+model:
+  _target_: model.diffusion.diffusion.DiffusionModel
+  predict_epsilon: False
+  denoised_clip_value: null
+  aux_loss_fn:
+    _target_: model.diffusion.auxiliary_loss.TennisGeometricLoss
+    xml_path: /home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml
+    norm_stats_path: data/tennis/norm_stats.npz
+    lambda_ee_pos: 1.0
+    lambda_joint_vel: 1.0
+  network:
+    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
+    goal_dim: ${goal_dim}
+    time_dim: 64
+    mlp_dims: [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
+    activation_type: ReLU
+    out_activation_type: Identity
+    use_layernorm: False
+    residual_style: True
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  device: ${device}
+
+ema:
+  decay: 0.999
+
+train_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceDataset
+  dataset_path: ${train_dataset_path}
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  device: ${device}

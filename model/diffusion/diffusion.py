@@ -90,8 +90,7 @@ class DiffusionModel(nn.Module):
                 self.load_state_dict(checkpoint["model"], strict=False)
                 logging.info("Loaded RL-trained policy from %s", network_path)
         n_params = sum(p.numel() for p in self.parameters())
-        logging.info(f"Number of network parameters: {n_params}")
-        print(f"DiffusionModel parameters: {n_params:,}")
+        log.info(f"DiffusionModel parameters: {n_params:,}")
 
         """
         DDPM parameters

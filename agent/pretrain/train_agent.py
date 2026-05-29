@@ -80,6 +80,13 @@ class PreTrainAgent:
         self.ema = EMA(cfg.ema)
         self.ema_model = deepcopy(self.model)
 
+        # Optional goal conditioner (task-specific, computes cond["goal"] on-the-fly)
+        self.goal_conditioner = (
+            hydra.utils.instantiate(cfg.goal_conditioner).to(cfg.device)
+            if cfg.get("goal_conditioner") is not None
+            else None
+        )
+
         # Training params
         self.n_epochs = cfg.train.n_epochs
         self.batch_size = cfg.train.batch_size

@@ -178,6 +178,7 @@ class DiffusionMLP(nn.Module):
         action_dim,
         horizon_steps,
         cond_dim,
+        goal_dim=0,
         time_dim=16,
         mlp_dims=[256, 256],
         cond_mlp_dims=None,
@@ -199,15 +200,16 @@ class DiffusionMLP(nn.Module):
         else:
             model = MLP
         self.cond_dim = cond_dim
+        self.goal_dim = goal_dim
         if cond_mlp_dims is not None:
             self.cond_mlp = MLP(
                 [cond_dim] + cond_mlp_dims,
                 activation_type=activation_type,
                 out_activation_type="Identity",
             )
-            input_dim = time_dim + action_dim * horizon_steps + cond_mlp_dims[-1]
+            input_dim = time_dim + action_dim * horizon_steps + cond_mlp_dims[-1] + goal_dim
         else:
-            input_dim = time_dim + action_dim * horizon_steps + cond_dim
+            input_dim = time_dim + action_dim * horizon_steps + cond_dim + goal_dim
         self.mlp_mean = model(
             [input_dim] + mlp_dims + [output_dim],
             activation_type=activation_type,
@@ -243,6 +245,8 @@ class DiffusionMLP(nn.Module):
             if hasattr(self, "cond_mlp"):
                 state = self.cond_mlp(state)
             parts.append(state)
+        if self.goal_dim > 0 and "goal" in cond:
+            parts.append(cond["goal"].view(B, -1))
         x = torch.cat(parts, dim=-1)
 
         # mlp head

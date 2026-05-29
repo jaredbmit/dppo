@@ -60,7 +60,7 @@ def load_run_cfg(checkpoint_path: str) -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action_dim: int, denoising_steps: int, device: str, obs_dim: int = OBS_DIM, cfg: dict = {}) -> DiffusionModel:
+def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action_dim: int, denoising_steps: int, device: str, obs_dim: int = OBS_DIM, goal_dim: int = 0, cfg: dict = {}) -> DiffusionModel:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     sd = ckpt.get("ema", ckpt.get("model"))
     net_cfg = cfg.get("model", {}).get("network", {})
@@ -68,6 +68,7 @@ def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action
         action_dim=action_dim,
         horizon_steps=horizon_steps,
         cond_dim=obs_dim * cond_steps,
+        goal_dim=goal_dim,
         time_dim=net_cfg.get("time_dim", 16),
         mlp_dims=net_cfg.get("mlp_dims", [512, 512, 512]),
         activation_type=net_cfg.get("activation_type", "ReLU"),
@@ -218,6 +219,8 @@ def main() -> None:
     ap.add_argument("--checkpoint", type=str, required=True)
     ap.add_argument("--obs_dim", type=int, default=None,
                     help="Defaults to value from training config (0 for unconditional)")
+    ap.add_argument("--goal_dim", type=int, default=None,
+                    help="Defaults to value from training config (0 if not goal-conditioned)")
     ap.add_argument("--cond_steps", type=int, default=None,
                     help="Defaults to value from training config")
     ap.add_argument("--horizon_steps", type=int, default=None,
@@ -234,7 +237,8 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_run_cfg(args.checkpoint)
-    obs_dim         = args.obs_dim         if args.obs_dim is not None else cfg.get("obs_dim",         OBS_DIM)
+    obs_dim         = args.obs_dim         if args.obs_dim  is not None else cfg.get("obs_dim",         OBS_DIM)
+    goal_dim        = args.goal_dim        if args.goal_dim is not None else cfg.get("goal_dim",        0)
     cond_steps      = args.cond_steps      or cfg.get("cond_steps",      1)
     horizon_steps   = args.horizon_steps   or cfg.get("horizon_steps",   16)
     denoising_steps = args.denoising_steps or cfg.get("denoising_steps", 100)
@@ -249,8 +253,8 @@ def main() -> None:
     mean, std = load_norm_stats(args.data_dir)
     action_dim = len(mean)
 
-    print(f"Loading model (obs_dim={obs_dim}, cond_steps={cond_steps}, horizon_steps={horizon_steps}, action_dim={action_dim}, denoising_steps={denoising_steps})...")
-    model = load_model(args.checkpoint, cond_steps, horizon_steps, action_dim, denoising_steps, args.device, obs_dim=obs_dim, cfg=cfg)
+    print(f"Loading model (obs_dim={obs_dim}, goal_dim={goal_dim}, cond_steps={cond_steps}, horizon_steps={horizon_steps}, action_dim={action_dim}, denoising_steps={denoising_steps})...")
+    model = load_model(args.checkpoint, cond_steps, horizon_steps, action_dim, denoising_steps, args.device, obs_dim=obs_dim, goal_dim=goal_dim, cfg=cfg)
 
     print("Loading dataset...")
     dataset = StitchedSequenceDataset(

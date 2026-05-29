@@ -74,11 +74,10 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
                 # if done at the end of last iteration, the envs are just reset
                 firsts_trajs[0] = done_venv
 
-            # Holder
+            # Holder — generic over all obs keys (state, goal, ...)
             obs_trajs = {
-                "state": np.zeros(
-                    (self.n_steps, self.n_envs, self.n_cond_step, self.obs_dim)
-                )
+                key: np.zeros((self.n_steps, self.n_envs, *val.shape[1:]))
+                for key, val in prev_obs_venv.items()
             }
             chains_trajs = np.zeros(
                 (
@@ -99,15 +98,12 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
 
             # Collect a set of trajectories from env
             for step in range(self.n_steps):
-                if step % 10 == 0:
-                    print(f"Processed step {step} of {self.n_steps}")
 
                 # Select action
                 with torch.no_grad():
                     cond = {
-                        "state": torch.from_numpy(prev_obs_venv["state"])
-                        .float()
-                        .to(self.device)
+                        key: torch.from_numpy(val).float().to(self.device)
+                        for key, val in prev_obs_venv.items()
                     }
                     samples = self.model(
                         cond=cond,
@@ -138,7 +134,8 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
                     obs_full_trajs = np.vstack(
                         (obs_full_trajs, obs_full_venv.transpose(1, 0, 2))
                     )
-                obs_trajs["state"][step] = prev_obs_venv["state"]
+                for key in obs_trajs:
+                    obs_trajs[key][step] = prev_obs_venv[key]
                 chains_trajs[step] = chains_venv
                 reward_trajs[step] = reward_venv
                 terminated_trajs[step] = terminated_venv
@@ -187,36 +184,34 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
             else:
                 episode_reward = np.array([])
                 num_episode_finished = 0
-                avg_episode_reward = 0
+                avg_episode_reward = np.mean(reward_trajs)
                 avg_best_reward = 0
                 success_rate = 0
-                log.info("[WARNING] No episode completed within the iteration!")
 
             # Update models
             if not eval_mode:
                 with torch.no_grad():
-                    obs_trajs["state"] = (
-                        torch.from_numpy(obs_trajs["state"]).float().to(self.device)
-                    )
+                    for key in obs_trajs:
+                        obs_trajs[key] = (
+                            torch.from_numpy(obs_trajs[key]).float().to(self.device)
+                        )
 
                     # Calculate value and logprobs - split into batches to prevent out of memory
                     num_split = math.ceil(
                         self.n_envs * self.n_steps / self.logprob_batch_size
                     )
                     obs_ts = [{} for _ in range(num_split)]
-                    obs_k = einops.rearrange(
-                        obs_trajs["state"],
-                        "s e ... -> (s e) ...",
-                    )
-                    obs_ts_k = torch.split(obs_k, self.logprob_batch_size, dim=0)
-                    for i, obs_t in enumerate(obs_ts_k):
-                        obs_ts[i]["state"] = obs_t
-                    values_trajs = np.empty((0, self.n_envs))
-                    for obs in obs_ts:
-                        values = self.model.critic(obs).cpu().numpy().flatten()
-                        values_trajs = np.vstack(
-                            (values_trajs, values.reshape(-1, self.n_envs))
+                    for key in obs_trajs:
+                        obs_k_key = einops.rearrange(
+                            obs_trajs[key], "s e ... -> (s e) ..."
                         )
+                        obs_ts_k = torch.split(obs_k_key, self.logprob_batch_size, dim=0)
+                        for i, obs_t in enumerate(obs_ts_k):
+                            obs_ts[i][key] = obs_t
+                    values_flat = []
+                    for obs in obs_ts:
+                        values_flat.append(self.model.critic(obs).cpu().numpy().flatten())
+                    values_trajs = np.concatenate(values_flat).reshape(self.n_steps, self.n_envs)
                     chains_t = einops.rearrange(
                         torch.from_numpy(chains_trajs).float().to(self.device),
                         "s e t h d -> (s e) t h d",
@@ -248,9 +243,8 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
 
                     # bootstrap value with GAE if not terminal - apply reward scaling with constant if specified
                     obs_venv_ts = {
-                        "state": torch.from_numpy(obs_venv["state"])
-                        .float()
-                        .to(self.device)
+                        key: torch.from_numpy(val).float().to(self.device)
+                        for key, val in obs_venv.items()
                     }
                     advantages_trajs = np.zeros_like(reward_trajs)
                     lastgaelam = 0
@@ -280,10 +274,8 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
 
                 # k for environment step
                 obs_k = {
-                    "state": einops.rearrange(
-                        obs_trajs["state"],
-                        "s e ... -> (s e) ...",
-                    )
+                    key: einops.rearrange(obs_trajs[key], "s e ... -> (s e) ...")
+                    for key in obs_trajs
                 }
                 chains_k = einops.rearrange(
                     torch.tensor(chains_trajs, device=self.device).float(),
@@ -318,7 +310,7 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
                             inds_b,
                             (self.n_steps * self.n_envs, self.model.ft_denoising_steps),
                         )
-                        obs_b = {"state": obs_k["state"][batch_inds_b]}
+                        obs_b = {key: obs_k[key][batch_inds_b] for key in obs_k}
                         chains_prev_b = chains_k[batch_inds_b, denoising_inds_b]
                         chains_next_b = chains_k[batch_inds_b, denoising_inds_b + 1]
                         returns_b = returns_k[batch_inds_b]
@@ -371,7 +363,7 @@ class TrainPPODiffusionAgent(TrainPPOAgent):
                             if self.learn_eta and batch % self.eta_update_interval == 0:
                                 self.eta_optimizer.step()
                         self.critic_optimizer.step()
-                        log.info(
+                        log.debug(
                             f"approx_kl: {approx_kl}, update_epoch: {update_epoch}, num_batch: {num_batch}"
                         )
 

@@ -69,6 +69,16 @@ def make_async(
           dtype=float32)
     """
 
+    if env_type == "tennis":
+        from env.gym_utils.wrapper.tennis_lowdim import TennisKinematicVecEnv
+        return TennisKinematicVecEnv(
+            n_envs=num_envs,
+            max_episode_steps=max_episode_steps,
+            n_obs_steps=obs_steps,
+            act_steps=act_steps,
+            **kwargs,
+        )
+
     if env_type == "furniture":
         from furniture_bench.envs.observation import DEFAULT_STATE_OBS
         from furniture_bench.envs.furniture_rl_sim_env import FurnitureRLSimEnv

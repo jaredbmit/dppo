@@ -20,9 +20,6 @@ class TrainPPOAgent(TrainAgent):
 
         # Batch size for logprobs calculations after an iteration --- prevent out of memory if using a single batch
         self.logprob_batch_size = cfg.train.get("logprob_batch_size", 10000)
-        assert (
-            self.logprob_batch_size % self.n_envs == 0
-        ), "logprob_batch_size must be divisible by n_envs"
 
         # note the discount factor gamma here is applied to reward every act_steps, instead of every env step
         self.gamma = cfg.train.gamma

@@ -44,10 +44,8 @@ class CriticObs(torch.nn.Module):
             or (B, num_feature) from ViT encoder
         """
         if isinstance(cond, dict):
-            B = len(cond["state"])
-
-            # flatten history
-            state = cond["state"].view(B, -1)
+            B = next(iter(cond.values())).shape[0]
+            state = torch.cat([v.view(B, -1) for v in cond.values()], dim=-1)
         else:
             state = cond
         q1 = self.Q1(state)

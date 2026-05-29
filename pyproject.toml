@@ -27,6 +27,7 @@ dependencies = [
     "numpy",
     "gdown>=6.0.0",
     "imageio[ffmpeg]>=2.37.3",
+    "gym<=0.26.2",
 ]
 
 [project.optional-dependencies]

@@ -124,6 +124,8 @@ class MultiStep(gym.Wrapper):
             self.action = deque(
                 [self._single_action_space.sample()], maxlen=self.n_obs_steps
             )
+        else:
+            self.action = deque(maxlen=self.n_obs_steps)
         self.reward = list()
         self.done = list()
         self.info = defaultdict(lambda: deque(maxlen=self.n_obs_steps + 1))

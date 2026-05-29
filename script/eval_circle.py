@@ -36,6 +36,7 @@ from scipy.spatial.transform import Rotation
 
 from model.diffusion.diffusion import DiffusionModel
 from model.diffusion.mlp_diffusion import DiffusionMLP
+from model.diffusion.dit_diffusion import DiffusionDiT
 from agent.dataset.sequence import StitchedSequenceDataset
 
 OBS_DIM  = 38
@@ -75,18 +76,35 @@ def load_model(
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     sd = ckpt.get("ema", ckpt.get("model"))
     net_cfg = cfg.get("model", {}).get("network", {})
-    network = DiffusionMLP(
-        action_dim=action_dim,
-        horizon_steps=horizon_steps,
-        cond_dim=obs_dim * cond_steps,
-        goal_dim=goal_dim,
-        time_dim=net_cfg.get("time_dim", 64),
-        mlp_dims=net_cfg.get("mlp_dims", [512] * 13),
-        activation_type=net_cfg.get("activation_type", "ReLU"),
-        out_activation_type=net_cfg.get("out_activation_type", "Identity"),
-        use_layernorm=net_cfg.get("use_layernorm", False),
-        residual_style=net_cfg.get("residual_style", True),
-    )
+    target = net_cfg.get("_target_", "")
+
+    # Build the same network architecture the checkpoint was trained with.
+    if target.endswith("DiffusionDiT"):
+        network = DiffusionDiT(
+            action_dim=action_dim,
+            horizon_steps=horizon_steps,
+            obs_dim=obs_dim,
+            cond_steps=cond_steps,
+            goal_dim=goal_dim,
+            d_model=net_cfg.get("d_model", 256),
+            n_heads=net_cfg.get("n_heads", 4),
+            n_layers=net_cfg.get("n_layers", 6),
+            ff_mult=net_cfg.get("ff_mult", 4),
+            dropout=net_cfg.get("dropout", 0.0),
+        )
+    else:
+        network = DiffusionMLP(
+            action_dim=action_dim,
+            horizon_steps=horizon_steps,
+            cond_dim=obs_dim * cond_steps,
+            goal_dim=goal_dim,
+            time_dim=net_cfg.get("time_dim", 64),
+            mlp_dims=net_cfg.get("mlp_dims", [512] * 13),
+            activation_type=net_cfg.get("activation_type", "ReLU"),
+            out_activation_type=net_cfg.get("out_activation_type", "Identity"),
+            use_layernorm=net_cfg.get("use_layernorm", False),
+            residual_style=net_cfg.get("residual_style", True),
+        )
     model = DiffusionModel(
         network=network,
         horizon_steps=horizon_steps,
@@ -97,7 +115,15 @@ def load_model(
         denoised_clip_value=None,
         device=device,
     )
-    model.load_state_dict(sd, strict=False)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    # network.* params should all load; surface a real architecture mismatch
+    # instead of silently running a randomly-initialized model.
+    net_missing = [k for k in missing if k.startswith("network.")]
+    if net_missing:
+        raise RuntimeError(
+            f"{len(net_missing)} network params not found in checkpoint "
+            f"(architecture mismatch?). First few: {net_missing[:5]}"
+        )
     model.eval()
     return model
 

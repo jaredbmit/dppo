@@ -64,15 +64,14 @@ class TennisXYGoalConditioner(nn.Module):
         return xy_end
 
     def forward(self, x: torch.Tensor, cond: dict) -> dict:
-        """Augment cond with a hindsight XY goal.
-
-        Args:
-            x:    (B, T, 38) normalized future sequence (the BC target)
-            cond: existing condition dict (modified copy is returned)
-        Returns:
-            cond with added key "goal": (B, 2)
-        """
-        goal = self.integrate_xy(x)
+        """Add a hindsight XY goal: displacement to the chunk end, anchored at the
+        last conditioning frame (or x[0] if no conditioning is provided)."""
+        state = cond.get("state")
+        if state is not None and state.shape[1] >= 1:
+            seq = torch.cat([state[:, -1:], x], dim=1)  # anchor at conditioning frame
+        else:
+            seq = x  # unconditional / CFG drop / first chunk -> anchor at x[0]
+        goal = self.integrate_xy(seq)
         if self.training and self.noise_std > 0:
             goal = goal + torch.randn_like(goal) * self.noise_std
         cond = dict(cond)

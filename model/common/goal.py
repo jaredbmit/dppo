@@ -77,7 +77,3 @@ class XYGoalConditioner(nn.Module):
         cond = dict(cond)
         cond["goal"] = goal
         return cond
-
-
-class TennisXYGoalConditioner(XYDisplacementGoalConditioner):
-    """Backward-compatible alias for existing tennis configs."""

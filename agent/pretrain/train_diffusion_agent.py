@@ -22,7 +22,12 @@ class TrainDiffusionAgent(PreTrainAgent):
         timer = Timer()
         self.epoch = 1
         cnt_batch = 0
-        for _ in range(self.n_epochs):
+        step_losses, step_aux = [], {}  # running window for dense (per-step) logging
+        if self.load_epoch:
+            self.load(self.load_epoch)
+            self.epoch = self.load_epoch + 1
+            cnt_batch = self.load_epoch * len(self.dataloader_train)
+        for _ in range(self.n_epochs - self.load_epoch):
 
             # train
             loss_train_epoch = []
@@ -39,8 +44,10 @@ class TrainDiffusionAgent(PreTrainAgent):
                 loss_train, aux_train = self.model.loss(x, cond)
                 loss_train.backward()
                 loss_train_epoch.append(loss_train.item())
+                step_losses.append(loss_train.item())
                 for k, v in aux_train.items():
                     aux_train_epoch.setdefault(k, []).append(v.item())
+                    step_aux.setdefault(k, []).append(v.item())
 
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -49,6 +56,27 @@ class TrainDiffusionAgent(PreTrainAgent):
                 if cnt_batch % self.update_ema_freq == 0:
                     self.step_ema()
                 cnt_batch += 1
+
+                # dense logging: every log_step_freq gradient steps, keyed on the
+                # global step (so wandb has one consistent step axis in this mode)
+                if self.log_step_freq > 0 and cnt_batch % self.log_step_freq == 0:
+                    loss_step = np.mean(step_losses)
+                    aux_step = {k: np.mean(v) for k, v in step_aux.items()}
+                    log.info(
+                        f"step {cnt_batch} (ep {self.epoch}): "
+                        f"train loss {loss_step:8.4f} | t:{timer():8.4f}"
+                    )
+                    if self.use_wandb:
+                        wandb.log(
+                            {
+                                "loss - train": loss_step,
+                                **{f"loss - {k}": v for k, v in aux_step.items()},
+                                "epoch": self.epoch,
+                            },
+                            step=cnt_batch,
+                            commit=True,
+                        )
+                    step_losses, step_aux = [], {}
             loss_train = np.mean(loss_train_epoch)
             aux_train_mean = {k: np.mean(v) for k, v in aux_train_epoch.items()}
 
@@ -80,7 +108,11 @@ class TrainDiffusionAgent(PreTrainAgent):
                 log.info(
                     f"{self.epoch}: train loss {loss_train:8.4f} | t:{timer():8.4f}"
                 )
-                if self.use_wandb:
+                # Per-epoch wandb logging keyed on epoch. When dense per-step
+                # logging is active we already log train/aux on the global-step
+                # axis, so here we only add the (epoch-granular) val loss, keyed
+                # on the current global step to keep one monotonic wandb axis.
+                if self.use_wandb and self.log_step_freq == 0:
                     if loss_val is not None:
                         wandb.log(
                             {"loss - val": loss_val}, step=self.epoch, commit=False
@@ -93,6 +125,8 @@ class TrainDiffusionAgent(PreTrainAgent):
                         step=self.epoch,
                         commit=True,
                     )
+                elif self.use_wandb and loss_val is not None:
+                    wandb.log({"loss - val": loss_val}, step=cnt_batch, commit=True)
 
             # count
             self.epoch += 1

@@ -4,6 +4,7 @@ Parent pre-training agent class.
 """
 
 import os
+import glob
 import random
 import numpy as np
 from omegaconf import OmegaConf
@@ -99,7 +100,23 @@ class PreTrainAgent:
         self.checkpoint_dir = os.path.join(self.logdir, "checkpoint")
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.log_freq = cfg.train.get("log_freq", 1)
+        # Optional dense logging every N gradient steps (0 = log per-epoch only).
+        self.log_step_freq = cfg.train.get("log_step_freq", 0)
         self.save_model_freq = cfg.train.save_model_freq
+
+        # Resume: explicit epoch takes priority, then auto-detect latest checkpoint
+        if cfg.train.get("load_epoch", 0):
+            self.load_epoch = cfg.train.load_epoch
+        elif cfg.train.get("resume", False):
+            existing = glob.glob(os.path.join(self.checkpoint_dir, "state_*.pt"))
+            self.load_epoch = max(
+                (int(os.path.basename(p)[len("state_"):-len(".pt")]) for p in existing),
+                default=0,
+            )
+            if self.load_epoch:
+                log.info(f"Resuming from epoch {self.load_epoch}")
+        else:
+            self.load_epoch = 0
 
         # Build dataset
         self.dataset_train = hydra.utils.instantiate(cfg.train_dataset)
@@ -151,25 +168,25 @@ class PreTrainAgent:
         self.ema.update_model_average(self.ema_model, self.model)
 
     def save_model(self):
-        """
-        saves model and ema to disk;
-        """
         data = {
             "epoch": self.epoch,
             "model": self.model.state_dict(),
             "ema": self.ema_model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "lr_scheduler": self.lr_scheduler.state_dict(),
         }
         savepath = os.path.join(self.checkpoint_dir, f"state_{self.epoch}.pt")
         torch.save(data, savepath)
         log.info(f"Saved model to {savepath}")
 
     def load(self, epoch):
-        """
-        loads model and ema from disk
-        """
         loadpath = os.path.join(self.checkpoint_dir, f"state_{epoch}.pt")
         data = torch.load(loadpath, weights_only=True)
 
         self.epoch = data["epoch"]
         self.model.load_state_dict(data["model"])
         self.ema_model.load_state_dict(data["ema"])
+        if "optimizer" in data:
+            self.optimizer.load_state_dict(data["optimizer"])
+        if "lr_scheduler" in data:
+            self.lr_scheduler.load_state_dict(data["lr_scheduler"])

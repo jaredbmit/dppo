@@ -22,7 +22,7 @@ denoising_steps: 100
 
 wandb:
   entity: mstolzle-drl
-  project: lafan-pretrain
+  project: dppo
   run: ${now:%H-%M-%S}_${name}
 
 train:

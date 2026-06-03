@@ -21,7 +21,7 @@ cond_steps: 1
 denoising_steps: 100
 
 wandb:
-  entity: jaredb-drl
+  entity: mstolzle-drl
   project: lafan-pretrain
   run: ${now:%H-%M-%S}_${name}
 
@@ -55,7 +55,7 @@ model:
     cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
     goal_dim: ${goal_dim}
     time_dim: 64
-    mlp_dims: [512, 512, 512, 512, 512, 512, 512, 512]
+    mlp_dims: [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
     activation_type: ReLU
     out_activation_type: Identity
     use_layernorm: False

@@ -76,6 +76,11 @@ all = [
     "robomimic @ git+https://github.com/ARISE-Initiative/robomimic.git",
     "robosuite @ git+https://github.com/ARISE-Initiative/robosuite.git@v1.4.1",
 ]
+viz = [
+    "trimesh>=4.12.2",
+    "viser>=1.0.30",
+    "yourdfpy>=0.0.60",
+]
 
 [project.urls]
 Homepage = "https://diffusion-ppo.github.io/"

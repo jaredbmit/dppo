@@ -1,4 +1,4 @@
-"""Render sampled G1 actions from sample_tennis.py as a video.
+"""Render sampled G1 actions from sample_diffusion.py as a video.
 
 Observation layout expected in the .npz (physical units, post-denorm):
   [0:3]   gvec         — gravity direction in pelvis frame
@@ -11,13 +11,16 @@ Yaw is integrated from gyro_z; XY position is integrated from root_vel_xy
 rotated into the world frame.
 
 Usage:
-  uv run python script/render_tennis.py \\
+  uv run python script/render_motion.py \\
       --samples log/.../samples/teacher_forced.npz \\
       --xml_path ~/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml \\
       --out /tmp/render.mp4
 """
 
 from __future__ import annotations
+
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")
 
 import argparse
 from pathlib import Path
@@ -120,7 +123,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--samples", required=True, help="Path to .npz from sample_tennis.py")
+    ap.add_argument("--samples", required=True, help="Path to .npz from sample_diffusion.py")
     ap.add_argument("--xml_path", default=str(Path.home() / "drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml"), help="Path to G1 MuJoCo scene XML")
     ap.add_argument("--out", default=None)
     ap.add_argument("--key", default="actions", help="Key to render from npz (actions / gt_states)")

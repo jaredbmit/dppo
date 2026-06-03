@@ -74,7 +74,7 @@ class DiffusionModel(nn.Module):
         # Clip epsilon for numerical stability
         self.eps_clip_value = eps_clip_value
 
-        # Optional auxiliary loss module (e.g. geometric losses for tennis)
+        # Optional auxiliary loss module (e.g. geometric losses for G1 motion)
         self.aux_loss_fn = aux_loss_fn.to(device) if aux_loss_fn is not None else None
 
         # Set up models

@@ -19,6 +19,8 @@ Usage:
 
 from __future__ import annotations
 
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")
 import argparse
 from collections import deque
 from pathlib import Path
@@ -38,6 +40,7 @@ from model.diffusion.diffusion import DiffusionModel
 from model.diffusion.mlp_diffusion import DiffusionMLP
 from model.diffusion.dit_diffusion import DiffusionDiT
 from agent.dataset.sequence import StitchedSequenceDataset
+from sample_diffusion import resolve_data_dir
 
 OBS_DIM  = 38
 FREQ     = 50.0
@@ -75,8 +78,19 @@ def load_model(
 ) -> DiffusionModel:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     sd = ckpt.get("ema", ckpt.get("model"))
-    net_cfg = cfg.get("model", {}).get("network", {})
+    # Pretrain configs put the net under model.network; finetune under model.actor.
+    model_cfg = cfg.get("model", {})
+    net_cfg = model_cfg.get("network") or model_cfg.get("actor") or {}
     target = net_cfg.get("_target_", "")
+
+    # Finetune checkpoints carry frozen `network.*`/`actor.*` plus the tuned
+    # `actor_ft.*`. Select the fine-tuned policy and remap onto `network.*`.
+    if any(k.startswith("actor_ft.") for k in sd):
+        sd = {
+            "network." + k[len("actor_ft."):]: v
+            for k, v in sd.items()
+            if k.startswith("actor_ft.")
+        }
 
     # Build the same network architecture the checkpoint was trained with.
     if target.endswith("DiffusionDiT"):
@@ -288,9 +302,12 @@ def write_log(
     all_records: dict[GoalMode, list[list[Record]]],
     circle: CircleTrajectory,
     out_path: str,
+    provenance: list[str] | None = None,
 ) -> None:
     lines = ["Circle trajectory following — tracking error (‖robot − circle(t)‖)",
              "=" * 60, ""]
+    if provenance:
+        lines += provenance + [""]
 
     for mode, seeds_records in all_records.items():
         seed_means = []
@@ -444,7 +461,9 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--checkpoint",      type=str,   required=True)
-    ap.add_argument("--data_dir",        type=Path,  default=Path("data/tennis"))
+    ap.add_argument("--data_dir",        type=Path,  default=None,
+                    help="Dataset dir (norm_stats.npz + train.npz). Defaults to the "
+                         "dataset the checkpoint was trained with, read from its config.")
     ap.add_argument("--xml_path",        type=str,
                     default=str(Path.home() / "drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml"))
     ap.add_argument("--out_dir",         type=str,   default=None)
@@ -473,6 +492,14 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg             = _load_run_cfg(args.checkpoint)
+    if args.data_dir is None:
+        args.data_dir = resolve_data_dir(cfg)
+        if args.data_dir is None:
+            raise SystemExit(
+                "Could not resolve --data_dir from the checkpoint config; pass it "
+                "explicitly (it must match the dataset the model was trained with)."
+            )
+        print(f"Resolved --data_dir from checkpoint config: {args.data_dir}")
     obs_dim         = args.obs_dim         if args.obs_dim         is not None else cfg.get("obs_dim",         OBS_DIM)
     goal_dim        = args.goal_dim        if args.goal_dim        is not None else cfg.get("goal_dim",        2)
     cond_steps      = args.cond_steps      or cfg.get("cond_steps",      1)
@@ -542,7 +569,14 @@ def main() -> None:
     plot_ground_tracks(all_records, circle, out_path=str(out_dir / "comparison.png"))
 
     print("\nAggregating metrics...")
-    write_log(all_records, circle, out_path=str(out_dir / "log.txt"))
+    provenance = [
+        f"checkpoint: {args.checkpoint}",
+        f"data_dir:   {args.data_dir}  (norm_stats + seed pose)",
+        f"circle:     radius={args.radius}m speed={args.speed}m/s duration={args.duration}s",
+        f"planning:   horizon={horizon_steps} replan={replan_steps} denoising={denoising_steps} "
+        f"cond_steps={cond_steps} goal_dim={goal_dim}  seed_obs=clip{args.clip_idx}/frame{args.frame_idx}",
+    ]
+    write_log(all_records, circle, out_path=str(out_dir / "log.txt"), provenance=provenance)
 
     print("\nDone.")
 

@@ -1,4 +1,4 @@
-"""Sample from a pre-trained tennis diffusion policy checkpoint.
+"""Sample from a pre-trained G1 motion diffusion policy checkpoint.
 
 The policy predicts the full 38-D next observation, so autoregressive rollout
 feeds the last predicted frame back as the next conditioning input.
@@ -22,10 +22,10 @@ Three output modes (all saved to --out_dir):
 All outputs are in physical (unnormalized) units.
 
 Usage:
-  python script/sample_tennis.py \\
-      --checkpoint log/tennis-pretrain/.../checkpoint/state_2000.pt \\
+  python script/sample_diffusion.py \\
+      --checkpoint log/<dataset>-pretrain/.../checkpoint/state_2000.pt \\
       --cond_steps 1
-  python script/sample_tennis.py \\
+  python script/sample_diffusion.py \\
       --checkpoint ... --cond_steps 4 --clip_idx 2 --rollout_steps 500
 """
 
@@ -41,6 +41,7 @@ import yaml
 
 from model.diffusion.diffusion import DiffusionModel
 from model.diffusion.mlp_diffusion import DiffusionMLP
+from model.diffusion.dit_diffusion import DiffusionDiT
 from agent.dataset.sequence import StitchedSequenceDataset
 
 OBS_DIM = 38
@@ -56,6 +57,30 @@ def load_run_cfg(checkpoint_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def resolve_data_dir(cfg: dict) -> Path | None:
+    """Recover the dataset directory the model was *trained* with from its run
+    config, so eval/sampling use the SAME norm stats and seed poses as training.
+
+    Using the wrong norm_stats silently rescales the model's (normalized) outputs
+    on denorm — e.g. evaluating a bones model with tennis stats traces a
+    different circle entirely. Prefer the resolved top-level keys; skip any
+    value that is still a hydra interpolation (``${...}``). Returns None if
+    nothing usable is found (caller should then error, not fall back).
+    """
+    env = cfg.get("env") or {}
+    specific = env.get("specific") or {}
+    candidates = [
+        cfg.get("train_dataset_path"),          # pretrain (resolved, top level)
+        specific.get("dataset_path"),           # finetune env
+        specific.get("norm_stats_path"),        # finetune env (norm stats)
+        (cfg.get("goal_conditioner") or {}).get("norm_stats_path"),  # pretrain goal cond
+    ]
+    for c in candidates:
+        if c and "${" not in str(c):
+            return Path(c).parent
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -64,18 +89,33 @@ def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     sd = ckpt.get("ema", ckpt.get("model"))
     net_cfg = cfg.get("model", {}).get("network", {})
-    network = DiffusionMLP(
-        action_dim=action_dim,
-        horizon_steps=horizon_steps,
-        cond_dim=obs_dim * cond_steps,
-        goal_dim=goal_dim,
-        time_dim=net_cfg.get("time_dim", 16),
-        mlp_dims=net_cfg.get("mlp_dims", [512, 512, 512]),
-        activation_type=net_cfg.get("activation_type", "ReLU"),
-        out_activation_type=net_cfg.get("out_activation_type", "Identity"),
-        use_layernorm=net_cfg.get("use_layernorm", False),
-        residual_style=net_cfg.get("residual_style", True),
-    )
+    # Pick the network class from the training config's network _target_.
+    if net_cfg.get("_target_", "").endswith("DiffusionDiT"):
+        network = DiffusionDiT(
+            action_dim=action_dim,
+            horizon_steps=horizon_steps,
+            obs_dim=obs_dim,
+            cond_steps=cond_steps,
+            goal_dim=goal_dim,
+            d_model=net_cfg.get("d_model", 256),
+            n_heads=net_cfg.get("n_heads", 4),
+            n_layers=net_cfg.get("n_layers", 6),
+            ff_mult=net_cfg.get("ff_mult", 4),
+            dropout=net_cfg.get("dropout", 0.0),
+        )
+    else:
+        network = DiffusionMLP(
+            action_dim=action_dim,
+            horizon_steps=horizon_steps,
+            cond_dim=obs_dim * cond_steps,
+            goal_dim=goal_dim,
+            time_dim=net_cfg.get("time_dim", 16),
+            mlp_dims=net_cfg.get("mlp_dims", [512, 512, 512]),
+            activation_type=net_cfg.get("activation_type", "ReLU"),
+            out_activation_type=net_cfg.get("out_activation_type", "Identity"),
+            use_layernorm=net_cfg.get("use_layernorm", False),
+            residual_style=net_cfg.get("residual_style", True),
+        )
     model = DiffusionModel(
         network=network,
         horizon_steps=horizon_steps,
@@ -123,10 +163,57 @@ def seed_buffer(seed_frame: torch.Tensor, cond_steps: int) -> deque:
     return deque([seed_frame.clone() for _ in range(cond_steps)], maxlen=cond_steps)
 
 
+def compute_hindsight_goal(
+    chunk_norm: torch.Tensor,
+    context_norm: torch.Tensor,
+    mean: np.ndarray,
+    std: np.ndarray,
+    freq: float = FREQ,
+) -> torch.Tensor:
+    """Compute the body-frame XY displacement goal the same way XYGoalConditioner does.
+
+    Args:
+        chunk_norm:   (T_p, D) normalized future frames (the ground-truth actions)
+        context_norm: (D,)     normalized context frame (the conditioning state)
+        mean, std:    (D,) normalization statistics
+    Returns:
+        (1, 2) goal tensor on CPU
+    """
+    dt = 1.0 / freq
+    # Prepend context so integration starts from the anchor frame (matches training)
+    seq = torch.cat([context_norm.unsqueeze(0), chunk_norm], dim=0)  # (T_p+1, D)
+    dev = seq.device
+    mean = mean.to(dev)
+    std  = std.to(dev)
+
+    gyro_z = seq[:, 5] * std[5] + mean[5]    # (T_p+1,) physical
+    vel_h  = seq[:, 36:38] * std[36:38] + mean[36:38]  # (T_p+1, 2) physical
+
+    # Integrate yaw: yaw[t] = sum(gyro_z[0..t-1]) * dt
+    yaw = torch.zeros(len(seq), device=dev)
+    yaw[1:] = torch.cumsum(gyro_z[:-1], dim=0) * dt
+
+    # Rotate heading-frame velocity into body frame and integrate (exclude last frame)
+    cos_y = torch.cos(yaw[:-1])
+    sin_y = torch.sin(yaw[:-1])
+    vx_w = cos_y * vel_h[:-1, 0] - sin_y * vel_h[:-1, 1]
+    vy_w = sin_y * vel_h[:-1, 0] + cos_y * vel_h[:-1, 1]
+    xy = torch.stack([vx_w.sum(), vy_w.sum()]) * dt  # (2,)
+    return xy.unsqueeze(0)  # (1, 2)
+
+
 @torch.no_grad()
-def sample_chunk(model: DiffusionModel, buffer: deque, cond_steps: int, device: str) -> np.ndarray:
+def sample_chunk(
+    model: DiffusionModel,
+    buffer: deque,
+    cond_steps: int,
+    device: str,
+    goal: torch.Tensor | None = None,
+) -> np.ndarray:
     """Run one diffusion forward pass. Returns (T_p, ACT_DIM) numpy, normalized."""
     cond = {"state": make_buffer(buffer, cond_steps, device)}
+    if goal is not None:
+        cond["goal"] = goal.to(device)
     out = model(cond=cond)
     return out.trajectories.squeeze(0).cpu().numpy()  # (T_p, ACT_DIM)
 
@@ -143,12 +230,14 @@ def sample_random_chunks(
     device: str,
     mean: np.ndarray,
     std: np.ndarray,
+    goal_dim: int = 0,
 ) -> dict:
     indices = np.random.randint(0, len(dataset.states), size=n_chunks)
     chunks, cond_states = [], []
     for idx in indices:
         buf = seed_buffer(dataset.states[idx], cond_steps)
-        chunk = sample_chunk(model, buf, cond_steps, device)
+        goal = torch.zeros(1, goal_dim) if goal_dim > 0 else None
+        chunk = sample_chunk(model, buf, cond_steps, device, goal=goal)
         chunks.append(denorm(chunk, mean, std))
         cond_states.append(denorm(dataset.states[idx].cpu().numpy(), mean, std))
     return {
@@ -166,16 +255,25 @@ def sample_teacher_forced(
     device: str,
     mean: np.ndarray,
     std: np.ndarray,
+    goal_dim: int = 0,
 ) -> dict:
     T = min(rollout_steps, len(clip_states) - horizon_steps)
     all_actions, all_gt_states = [], []
+    mean_t = torch.from_numpy(mean).float()
+    std_t  = torch.from_numpy(std).float()
     t = 0
     while t + horizon_steps <= T:
         buf = deque(
             [clip_states[max(0, t - i)] for i in reversed(range(cond_steps))],
             maxlen=cond_steps,
         )
-        chunk = sample_chunk(model, buf, cond_steps, device)
+        # Compute hindsight goal from ground-truth chunk (matches training-time labeling)
+        goal = None
+        if goal_dim > 0:
+            gt_chunk = clip_states[t + 1 : t + horizon_steps + 1]  # (H, D) normalized
+            context  = clip_states[t]                               # (D,) normalized
+            goal = compute_hindsight_goal(gt_chunk, context, mean_t, std_t)
+        chunk = sample_chunk(model, buf, cond_steps, device, goal=goal)
         all_actions.append(denorm(chunk, mean, std))
         all_gt_states.append(denorm(clip_states[t:t + horizon_steps].cpu().numpy(), mean, std))
         t += horizon_steps
@@ -194,12 +292,14 @@ def sample_autoregressive(
     device: str,
     mean: np.ndarray,
     std: np.ndarray,
+    goal_dim: int = 0,
 ) -> dict:
     buf = seed_buffer(clip_states[0], cond_steps)
     all_actions = []
     t = 0
     while t < rollout_steps:
-        chunk = sample_chunk(model, buf, cond_steps, device)  # (T_p, 38) normalized
+        goal = torch.zeros(1, goal_dim) if goal_dim > 0 else None
+        chunk = sample_chunk(model, buf, cond_steps, device, goal=goal)  # (T_p, 38) normalized
         all_actions.append(denorm(chunk, mean, std))
         buf.append(torch.from_numpy(chunk[-1].astype(np.float32)).to(clip_states.device))
         t += horizon_steps
@@ -227,7 +327,9 @@ def main() -> None:
                     help="Defaults to value from training config")
     ap.add_argument("--denoising_steps", type=int, default=None,
                     help="Defaults to value from training config")
-    ap.add_argument("--data_dir", type=Path, default=Path("data/tennis"))
+    ap.add_argument("--data_dir", type=Path, default=None,
+                    help="Dataset dir (norm_stats.npz + train.npz). Defaults to the "
+                         "dataset the checkpoint was trained with, read from its config.")
     ap.add_argument("--out_dir", type=Path, default=None)
     ap.add_argument("--clip_idx", type=int, default=0)
     ap.add_argument("--n_chunks", type=int, default=64)
@@ -237,6 +339,14 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_run_cfg(args.checkpoint)
+    if args.data_dir is None:
+        args.data_dir = resolve_data_dir(cfg)
+        if args.data_dir is None:
+            raise SystemExit(
+                "Could not resolve --data_dir from the checkpoint config; pass it "
+                "explicitly (it must match the dataset the model was trained with)."
+            )
+        print(f"Resolved --data_dir from checkpoint config: {args.data_dir}")
     obs_dim         = args.obs_dim         if args.obs_dim  is not None else cfg.get("obs_dim",         OBS_DIM)
     goal_dim        = args.goal_dim        if args.goal_dim is not None else cfg.get("goal_dim",        0)
     cond_steps      = args.cond_steps      or cfg.get("cond_steps",      1)
@@ -268,17 +378,17 @@ def main() -> None:
     print(f"Clip {args.clip_idx}: {len(clip_states)} frames")
 
     print(f"\nSampling {args.n_chunks} random chunks...")
-    chunks = sample_random_chunks(model, dataset, args.n_chunks, cond_steps, args.device, mean, std)
+    chunks = sample_random_chunks(model, dataset, args.n_chunks, cond_steps, args.device, mean, std, goal_dim=goal_dim)
     np.savez_compressed(args.out_dir / "chunks.npz", **chunks)
     print(f"  actions: {chunks['actions'].shape}")
 
     print(f"\nSampling teacher-forced rollout ({args.rollout_steps} steps)...")
-    tf = sample_teacher_forced(model, clip_states, args.rollout_steps, cond_steps, horizon_steps, args.device, mean, std)
+    tf = sample_teacher_forced(model, clip_states, args.rollout_steps, cond_steps, horizon_steps, args.device, mean, std, goal_dim=goal_dim)
     np.savez_compressed(args.out_dir / "teacher_forced.npz", **tf)
     print(f"  actions: {tf['actions'].shape}  gt_states: {tf['gt_states'].shape}")
 
     print(f"\nSampling autoregressive rollout ({args.rollout_steps} steps)...")
-    ar = sample_autoregressive(model, clip_states, args.rollout_steps, cond_steps, horizon_steps, args.device, mean, std)
+    ar = sample_autoregressive(model, clip_states, args.rollout_steps, cond_steps, horizon_steps, args.device, mean, std, goal_dim=goal_dim)
     np.savez_compressed(args.out_dir / "autoregressive.npz", **ar)
     print(f"  actions: {ar['actions'].shape}")
 

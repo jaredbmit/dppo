@@ -6,35 +6,45 @@ hydra:
 
 _target_: agent.pretrain.train_diffusion_agent.TrainDiffusionAgent
 
-name: tennis_pre_diffusion_mlp_ta${horizon_steps}_td${denoising_steps}
-logdir: log/tennis-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
-train_dataset_path: data/tennis/train.npz
+name: bones_loco_core_pre_diffusion_dit_goal_ta${horizon_steps}_td${denoising_steps}
+logdir: log/bones_loco_core-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: data/bones_loco_core/train.npz
 
 seed: 42
 device: cuda:0
 obs_dim: 38
 action_dim: 38
+goal_dim: 2
 horizon_steps: 50
 cond_steps: 1
-denoising_steps: 100
+denoising_steps: 20
 
 wandb:
   entity: jaredb-drl
-  project: tennis-pretrain
+  project: bones_loco_core-pretrain
   run: ${now:%H-%M-%S}_${name}
 
 train:
-  n_epochs: 2000
-  batch_size: 256
+  # 4,319,916 windows / batch 512 = 8,437 grad steps/epoch.
+  # 12 epochs ~= 101k steps; save every epoch -> 12 checkpoints across training.
+  n_epochs: 12
+  batch_size: 512
   learning_rate: 1e-4
   weight_decay: 0.0
   lr_scheduler:
-    first_cycle_steps: 2000
+    first_cycle_steps: 12
     warmup_steps: 0
     min_lr: 1e-6
   update_ema_freq: 1
-  save_model_freq: 5000
-  log_freq: 100
+  save_model_freq: 1
+  log_freq: 1          # per-epoch console summary
+  log_step_freq: 500   # dense logging every 500 grad steps (~17 logs/epoch)
+
+goal_conditioner:
+  _target_: model.common.goal.XYGoalConditioner
+  norm_stats_path: data/bones_loco_core/norm_stats.npz
+  noise_std: 0.1
+  freq: 50.0
 
 model:
   _target_: model.diffusion.diffusion.DiffusionModel
@@ -43,20 +53,21 @@ model:
   aux_loss_fn:
     _target_: model.diffusion.auxiliary_loss.G1GeometricLoss
     xml_path: /home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml
-    norm_stats_path: data/tennis/norm_stats.npz
+    norm_stats_path: data/bones_loco_core/norm_stats.npz
     lambda_ee_pos: 1.0
     lambda_joint_vel: 1.0
   network:
-    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+    _target_: model.diffusion.dit_diffusion.DiffusionDiT
     horizon_steps: ${horizon_steps}
     action_dim: ${action_dim}
-    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
-    time_dim: 64
-    mlp_dims: [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
-    activation_type: ReLU
-    out_activation_type: Identity
-    use_layernorm: False
-    residual_style: True
+    obs_dim: ${obs_dim}
+    cond_steps: ${cond_steps}
+    goal_dim: ${goal_dim}
+    d_model: 384
+    n_heads: 6
+    n_layers: 6
+    ff_mult: 4
+    dropout: 0.0
   horizon_steps: ${horizon_steps}
   obs_dim: ${obs_dim}
   action_dim: ${action_dim}
@@ -71,4 +82,5 @@ train_dataset:
   dataset_path: ${train_dataset_path}
   horizon_steps: ${horizon_steps}
   cond_steps: ${cond_steps}
+  max_n_episodes: 20000
   device: ${device}

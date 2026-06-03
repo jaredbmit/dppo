@@ -6,8 +6,8 @@ hydra:
 
 _target_: agent.finetune.train_ppo_diffusion_agent.TrainPPODiffusionAgent
 
-name: tennis_ft_ppo_diffusion_mlp_goal_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
-logdir: log/tennis-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+name: bones_loco_core_ft_ppo_diffusion_dit_goal_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
+logdir: log/bones_loco_core-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
 base_policy_path: ???
 
 seed: 42
@@ -15,7 +15,7 @@ device: cuda:0
 obs_dim: 38
 goal_dim: 2
 action_dim: 38
-denoising_steps: 100
+denoising_steps: 20
 ft_denoising_steps: 10
 cond_steps: 1
 horizon_steps: 50
@@ -23,20 +23,20 @@ act_steps: 50
 
 wandb:
   entity: jaredb-drl
-  project: tennis-finetune
+  project: bones_loco_core-finetune
   run: ${now:%H-%M-%S}_${name}
 
 env:
-  n_envs: 4096
-  name: tennis_goal_reaching
+  n_envs: 1024
+  name: bones_loco_core_goal_reaching
   env_type: g1_kinematic
   max_episode_steps: 1000
   reset_at_iteration: False
   save_video: False
   best_reward_threshold_for_success: -0.5  # approx: goal reached within 0.5m
   specific:
-    norm_stats_path: data/tennis/norm_stats.npz
-    dataset_path: data/tennis/train.npz
+    norm_stats_path: data/bones_loco_core/norm_stats.npz
+    dataset_path: data/bones_loco_core/train.npz
     horizon_steps: ${horizon_steps}
     goal_range: 2.0
     obs_steps: ${cond_steps}
@@ -44,22 +44,22 @@ env:
 
 train:
   n_train_itr: 2000
-  n_critic_warmup_itr: 10
-  n_steps: 4
+  n_critic_warmup_itr: 50
+  n_steps: 1
   gamma: 0.99
   actor_lr: 1e-5
   actor_weight_decay: 0
   actor_lr_scheduler:
-    first_cycle_steps: 2000
+    first_cycle_steps: 1000
     warmup_steps: 10
     min_lr: 1e-5
   critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
-    first_cycle_steps: 2000
+    first_cycle_steps: 1000
     warmup_steps: 10
     min_lr: 1e-3
-  save_model_freq: 200
+  save_model_freq: 300
   val_freq: 10
   log_freq: 1
   render:
@@ -70,7 +70,7 @@ train:
   reward_scale_const: 1.0
   gae_lambda: 0.95
   batch_size: 1024
-  update_epochs: 4
+  update_epochs: 1
   vf_coef: 0.5
   target_kl: 1
   logprob_batch_size: 1024
@@ -87,19 +87,21 @@ model:
   min_logprob_denoising_std: 0.1
   network_path: ${base_policy_path}
   actor:
-    _target_: model.diffusion.mlp_diffusion.DiffusionMLP
-    time_dim: 64
-    mlp_dims: [512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512, 512]
-    activation_type: ReLU
-    residual_style: True
-    cond_dim: ${eval:'${obs_dim} * ${cond_steps}'}
-    goal_dim: ${goal_dim}
+    _target_: model.diffusion.dit_diffusion.DiffusionDiT
     horizon_steps: ${horizon_steps}
     action_dim: ${action_dim}
+    obs_dim: ${obs_dim}
+    cond_steps: ${cond_steps}
+    goal_dim: ${goal_dim}
+    d_model: 384
+    n_heads: 6
+    n_layers: 6
+    ff_mult: 4
+    dropout: 0.0
   critic:
     _target_: model.common.critic.CriticObs
     cond_dim: ${eval:'${obs_dim} * ${cond_steps} + ${goal_dim}'}
-    mlp_dims: [256, 256, 256]
+    mlp_dims: [384, 384, 384, 384, 384]
     activation_type: Mish
     residual_style: True
   ft_denoising_steps: ${ft_denoising_steps}

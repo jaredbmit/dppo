@@ -1,5 +1,5 @@
 """
-Kinematic gym environment for the G1 tennis XY goal-reaching task.
+Kinematic gym environment for the G1 XY goal-reaching task.
 
 This environment is purely kinematic — there is no physics simulation,
 no controller, and no MuJoCo. The diffusion policy is a motion generator
@@ -41,9 +41,9 @@ IDX_VEL_XY = slice(36, 38)
 FREQ = 50.0  # dataset / policy control frequency (Hz)
 
 
-class TennisKinematicEnv(gym.Env):
+class G1KinematicEnv(gym.Env):
     """
-    Kinematic G1 tennis XY goal-reaching environment.
+    Kinematic G1 XY goal-reaching environment.
 
     The policy predicts the next observation; this env accepts that prediction
     as the next state. Displacement is integrated from the velocity fields
@@ -179,9 +179,9 @@ class TennisKinematicEnv(gym.Env):
         return np.array([r * np.cos(theta), r * np.sin(theta)], dtype=np.float32)
 
 
-class TennisKinematicVecEnv:
+class G1KinematicVecEnv:
     """
-    Fully vectorized kinematic environment for N parallel G1 tennis goal-reaching tasks.
+    Fully vectorized kinematic environment for N parallel G1 goal-reaching tasks.
 
     All N envs run as batched numpy operations — no subprocesses, no IPC.
     Obs-history stacking is handled internally, replacing MultiStep.

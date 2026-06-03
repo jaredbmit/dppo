@@ -7,12 +7,12 @@ import torch
 import torch.nn as nn
 
 
-class TennisXYGoalConditioner(nn.Module):
-    """Compute body-frame XY displacement goal on-the-fly from the action sequence.
+class XYDisplacementGoalConditioner(nn.Module):
+    """Compute body-frame XY displacement goal on-the-fly from an action sequence.
 
     During BC pretraining the goal is the integrated endpoint of each horizon
-    chunk (hindsight labeling), plus optional Gaussian noise.  At RL time the
-    caller sets cond["goal"] directly and this module is bypassed.
+    chunk (hindsight labeling), plus optional Gaussian noise. At RL time the
+    caller can set cond["goal"] directly and bypass this module.
 
     Observation layout (physical, post-denorm):
         [0:3]   gvec
@@ -77,3 +77,7 @@ class TennisXYGoalConditioner(nn.Module):
         cond = dict(cond)
         cond["goal"] = goal
         return cond
+
+
+class TennisXYGoalConditioner(XYDisplacementGoalConditioner):
+    """Backward-compatible alias for existing tennis configs."""

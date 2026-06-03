@@ -17,7 +17,7 @@ action_dim: 38
 goal_dim: 2
 horizon_steps: 50
 cond_steps: 1
-denoising_steps: 100
+denoising_steps: 20
 
 wandb:
   entity: jaredb-drl
@@ -38,7 +38,7 @@ train:
   log_freq: 100
 
 goal_conditioner:
-  _target_: model.common.goal.TennisXYGoalConditioner
+  _target_: model.common.goal.XYGoalConditioner
   norm_stats_path: data/tennis/norm_stats.npz
   noise_std: 0.1
   freq: 50.0
@@ -48,7 +48,7 @@ model:
   predict_epsilon: False
   denoised_clip_value: null
   aux_loss_fn:
-    _target_: model.diffusion.auxiliary_loss.TennisGeometricLoss
+    _target_: model.diffusion.auxiliary_loss.G1GeometricLoss
     xml_path: /home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml
     norm_stats_path: data/tennis/norm_stats.npz
     lambda_ee_pos: 1.0

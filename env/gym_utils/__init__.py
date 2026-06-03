@@ -69,9 +69,9 @@ def make_async(
           dtype=float32)
     """
 
-    if env_type == "tennis":
-        from env.gym_utils.wrapper.tennis_lowdim import TennisKinematicVecEnv
-        return TennisKinematicVecEnv(
+    if env_type == "g1_kinematic":
+        from env.gym_utils.wrapper.g1_kinematic_lowdim import G1KinematicVecEnv
+        return G1KinematicVecEnv(
             n_envs=num_envs,
             max_episode_steps=max_episode_steps,
             n_obs_steps=obs_steps,

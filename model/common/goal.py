@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 
-class TennisXYGoalConditioner(nn.Module):
+class XYGoalConditioner(nn.Module):
     """Compute body-frame XY displacement goal on-the-fly from the action sequence.
 
     During BC pretraining the goal is the integrated endpoint of each horizon

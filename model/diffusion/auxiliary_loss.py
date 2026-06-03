@@ -1,4 +1,4 @@
-"""Auxiliary geometric losses for tennis diffusion pretraining."""
+"""Auxiliary geometric losses for G1 motion diffusion pretraining."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from util.kinematics import G1Kinematics
 _IDX_JOINT_POS = slice(6, 35)
 
 
-class TennisGeometricLoss(nn.Module):
-    """End-effector position loss + joint velocity loss for 38-D tennis features.
+class G1GeometricLoss(nn.Module):
+    """End-effector position loss + joint velocity loss for 38-D G1 canonical features.
 
     Both losses operate on x0 predictions (not epsilon). The EE loss denormalizes
     into physical units before running FK; the joint velocity loss works in

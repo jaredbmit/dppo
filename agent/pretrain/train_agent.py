@@ -61,6 +61,7 @@ class PreTrainAgent:
     def __init__(self, cfg):
         super().__init__()
         self.seed = cfg.get("seed", 42)
+        self.device = cfg.device
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)

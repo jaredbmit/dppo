@@ -29,7 +29,7 @@ class TrainDiffusionAgent(PreTrainAgent):
             aux_train_epoch = {}
             for batch_train in self.dataloader_train:
                 if self.dataset_train.device == "cpu":
-                    batch_train = batch_to_device(batch_train)
+                    batch_train = batch_to_device(batch_train, self.device)
 
                 self.model.train()
                 x, cond = batch_train.actions, batch_train.conditions
@@ -58,7 +58,7 @@ class TrainDiffusionAgent(PreTrainAgent):
                 self.model.eval()
                 for batch_val in self.dataloader_val:
                     if self.dataset_val.device == "cpu":
-                        batch_val = batch_to_device(batch_val)
+                        batch_val = batch_to_device(batch_val, self.device)
                     x_val, cond_val = batch_val.actions, batch_val.conditions
                     if self.goal_conditioner is not None:
                         self.goal_conditioner.eval()

@@ -92,9 +92,9 @@ exclude = []
 exclude = []
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
+torch = { index = "pytorch-cu128" }
 
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true

@@ -366,9 +366,9 @@ def render_to_video(
     m = mujoco.MjModel.from_xml_path(xml_path)
     d = mujoco.MjData(m)
     kid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "home")
-    if kid < 0:
-        raise RuntimeError("No 'home' keyframe in XML")
-    default_qpos = m.key_qpos[kid, 7:].copy()
+    default_qpos = (m.key_qpos[kid, 7:] if kid >= 0 else m.qpos0[7:]).copy()
+    if default_qpos.shape != (29,):
+        raise RuntimeError(f"Expected 29 default joint positions, got {default_qpos.shape}")
 
     cam = mujoco.MjvCamera()
     cam.type      = mujoco.mjtCamera.mjCAMERA_FREE

@@ -232,9 +232,8 @@ class G1KinematicVecEnv:
         self._step_count    = np.zeros(n_envs,                  dtype=np.int32)
         self._goal_step     = np.zeros(n_envs,                  dtype=np.int32)
 
-        # Obs history: (N, n_obs_steps, dim) — rolling buffer for cond stacking
+        # Obs history: (N, n_obs_steps, dim) — rolling buffer for cond stacking.
         self._obs_hist  = np.zeros((n_envs, n_obs_steps, self.obs_dim),  dtype=np.float32)
-        self._goal_hist = np.zeros((n_envs, n_obs_steps, self.goal_dim), dtype=np.float32)
 
     # ------------------------------------------------------------------ #
 
@@ -244,7 +243,7 @@ class G1KinematicVecEnv:
 
     def reset(self) -> dict:
         self._reset_envs(np.ones(self.n_envs, dtype=bool))
-        return {"state": self._obs_hist.copy(), "goal": self._goal_hist.copy()}
+        return {"state": self._obs_hist.copy(), "goal": self._goal.copy()}
 
     def step(self, actions: np.ndarray):
         """
@@ -298,9 +297,7 @@ class G1KinematicVecEnv:
             # Roll obs history and append latest
             if self.n_obs_steps > 1:
                 self._obs_hist[:,  :-1] = self._obs_hist[:,  1:]
-                self._goal_hist[:, :-1] = self._goal_hist[:, 1:]
             self._obs_hist[:,  -1] = self._obs
-            self._goal_hist[:, -1] = self._goal
 
         # Reset finished envs; returned obs is from the fresh episode
         done = terminated | truncated
@@ -308,7 +305,7 @@ class G1KinematicVecEnv:
             self._reset_envs(done)
 
         return (
-            {"state": self._obs_hist.copy(), "goal": self._goal_hist.copy()},
+            {"state": self._obs_hist.copy(), "goal": self._goal.copy()},
             reward,
             terminated,
             truncated,
@@ -326,7 +323,7 @@ class G1KinematicVecEnv:
         self._reset_envs(mask)
         return {
             "state": self._obs_hist[env_ind].copy(),
-            "goal":  self._goal_hist[env_ind].copy(),
+            "goal":  self._goal[env_ind].copy(),
         }
 
     def close(self) -> None:
@@ -347,7 +344,6 @@ class G1KinematicVecEnv:
         self._goal[mask]          = self._sample_goals(n)
         # Fill history with the reset obs repeated across all n_obs_steps
         self._obs_hist[mask]  = self._obs[mask,  None, :]   # broadcasts over n_obs_steps
-        self._goal_hist[mask] = self._goal[mask, None, :]
 
     def _sample_goals(self, n: int) -> np.ndarray:
         r     = np.random.uniform(0.0, self.goal_range, size=n).astype(np.float32)

@@ -163,6 +163,113 @@ def chunk_physics_metrics(
     return _metrics_from_feet(feet_world, dt, contact_h, ground_z)
 
 
+# ---------------------------------------------------------------------------
+# Smoothness metrics (no reference data needed)
+# ---------------------------------------------------------------------------
+
+def _finite_diff(x: np.ndarray, dt: float, order: int) -> np.ndarray:
+    """Repeated time-derivative along axis 0 via finite differences."""
+    for _ in range(order):
+        x = np.diff(x, axis=0) / dt
+    return x
+
+
+def _sparc(speed: np.ndarray, freq: float,
+           pad_level: int = 4, fc: float = 10.0, amp_th: float = 0.05) -> float:
+    """Spectral arc length of a 1-D movement-speed profile (Balasubramanian 2015).
+
+    A reparameterization-robust smoothness measure: always <= 0, with values
+    closer to 0 indicating smoother motion. Returns 0.0 for degenerate input.
+    """
+    speed = np.asarray(speed, dtype=np.float64)
+    if speed.size < 4 or not np.any(speed):
+        return 0.0
+    nfft = int(2 ** (np.ceil(np.log2(speed.size)) + pad_level))
+    f = np.arange(0, freq, freq / nfft)
+    mf = np.abs(np.fft.fft(speed, nfft))
+    mf /= mf.max()
+    sel = f <= fc
+    f_sel, mf_sel = f[sel], mf[sel]
+    above = np.where(mf_sel >= amp_th)[0]
+    if above.size:
+        f_sel = f_sel[above[0]:above[-1] + 1]
+        mf_sel = mf_sel[above[0]:above[-1] + 1]
+    if f_sel.size < 2 or (f_sel[-1] - f_sel[0]) == 0:
+        return 0.0
+    df = np.diff(f_sel) / (f_sel[-1] - f_sel[0])
+    dm = np.diff(mf_sel)
+    return float(-np.sum(np.sqrt(df ** 2 + dm ** 2)))
+
+
+def rollout_smoothness_metrics(obs_denorm, freq: float = 50.0) -> dict:
+    """Joint-space smoothness for a single rollout (T, 38) of denormalized feats.
+
+    Smoothness is derivative-based, so the constant joint offset (jpos is angle
+    minus default pose) cancels — no FK or world frame needed.
+
+      jerk_rms      RMS of joint-angle jerk    (rad/s^3, lower = smoother)
+      acc_rms       RMS of joint-angle accel   (rad/s^2)
+      sparc         spectral arc length of the joint-space speed profile
+                    (<= 0, closer to 0 = smoother)
+      root_jerk_rms RMS jerk of the measured heading-frame root velocity (m/s^3)
+    """
+    x = np.asarray(obs_denorm, dtype=np.float64)
+    dt = 1.0 / freq
+    jpos = x[:, IDX_JPOS]                                   # (T, 29)
+    vel  = x[:, IDX_VEL_XY]                                 # (T, 2)
+    jerk = _finite_diff(jpos, dt, 3)
+    acc  = _finite_diff(jpos, dt, 2)
+    speed = np.linalg.norm(_finite_diff(jpos, dt, 1), axis=1)
+    root_jerk = _finite_diff(vel, dt, 2)
+    return {
+        "jerk_rms": float(np.sqrt(np.mean(jerk ** 2))) if jerk.size else 0.0,
+        "acc_rms": float(np.sqrt(np.mean(acc ** 2))) if acc.size else 0.0,
+        "sparc": _sparc(speed, freq),
+        "root_jerk_rms": float(np.sqrt(np.mean(root_jerk ** 2))) if root_jerk.size else 0.0,
+    }
+
+
+def rollout_limit_metrics(
+    obs_denorm,
+    joint_limits,
+    default_qpos,
+    freq: float = 50.0,
+    vel_limit=None,
+) -> dict:
+    """Joint position-limit violations + peak joint velocity for one rollout.
+
+    Args:
+        obs_denorm:   (T, 38) denormalized features (jpos block is offset-from-default).
+        joint_limits: (29, 2) absolute [lo, hi] per joint, in qpos[7:] order;
+                      unlimited joints use +-inf.
+        default_qpos: (29,) default joint angles added back to recover absolute angle.
+        vel_limit:    optional (29,) or scalar joint-speed limit (rad/s) for a
+                      velocity-violation fraction.
+
+      joint_pos_viol_frac  fraction of (frame x limited-joint) outside limits
+      joint_pos_viol_max   largest overshoot beyond a limit (rad)
+      joint_vel_max        peak |joint velocity| across the rollout (rad/s)
+    """
+    x = np.asarray(obs_denorm, dtype=np.float64)
+    dt = 1.0 / freq
+    lim = np.asarray(joint_limits, dtype=np.float64)        # (29, 2)
+    jpos_abs = x[:, IDX_JPOS] + np.asarray(default_qpos, dtype=np.float64)
+    over = np.maximum.reduce([lim[:, 0] - jpos_abs, jpos_abs - lim[:, 1],
+                              np.zeros_like(jpos_abs)])
+    limited = np.isfinite(lim[:, 0]) & np.isfinite(lim[:, 1])
+    over_lim = over[:, limited]
+    jvel = np.abs(_finite_diff(jpos_abs, dt, 1))            # (T-1, 29)
+    out = {
+        "joint_pos_viol_frac": float((over_lim > 1e-6).mean()) if over_lim.size else 0.0,
+        "joint_pos_viol_max": float(over_lim.max()) if over_lim.size else 0.0,
+        "joint_vel_max": float(jvel.max()) if jvel.size else 0.0,
+    }
+    if vel_limit is not None:
+        vel_over = np.maximum(jvel - np.asarray(vel_limit, dtype=np.float64), 0.0)
+        out["joint_vel_viol_frac"] = float((vel_over > 1e-6).mean()) if vel_over.size else 0.0
+    return out
+
+
 def rollout_physics_metrics(
     obs_denorm,
     world_xy,

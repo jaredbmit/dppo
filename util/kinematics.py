@@ -60,6 +60,20 @@ def _hinge_order(xml_path: Path) -> list[str]:
     ]
 
 
+def _joint_limits(xml_path: Path) -> np.ndarray:
+    """(29, 2) absolute [lo, hi] limits for hinge joints in qpos[7:] order.
+
+    Unlimited joints get [-inf, +inf], matching the joint_pos feature layout.
+    """
+    m = mujoco.MjModel.from_xml_path(str(xml_path))
+    lims = [
+        m.jnt_range[j].copy() if m.jnt_limited[j] else np.array([-np.inf, np.inf])
+        for j in range(m.njnt)
+        if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE
+    ]
+    return np.asarray(lims, dtype=np.float32)
+
+
 class G1Kinematics(nn.Module):
     """Differentiable pelvis-local FK for the G1, evaluated from joint offsets.
 
@@ -80,6 +94,7 @@ class G1Kinematics(nn.Module):
         perm = [mj_order.index(name) for name in chain_joints]
         self.register_buffer("perm",        torch.tensor(perm, dtype=torch.long))
         self.register_buffer("default_qpos", torch.from_numpy(_default_qpos(xml_path)))
+        self.register_buffer("joint_limits", torch.from_numpy(_joint_limits(xml_path)))
 
         self._foot_off = torch.tensor(FOOT_OFFSETS)
         self._hand_off = torch.tensor(HAND_OFFSETS)

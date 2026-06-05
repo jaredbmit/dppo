@@ -5,7 +5,9 @@ Runs N seeds per goal mode (circle / zero / random) and produces:
   eval_circle/zero.mp4        — goal always [0, 0]  (seed 0)
   eval_circle/random.mp4      — goal ~ N(0, radius) each replan step (seed 0)
   eval_circle/comparison.png  — ground tracks for all seeds overlaid
-  eval_circle/log.txt         — per-seed and aggregate distance-to-circle metrics
+  eval_circle/log.txt         — per-mode tracking error, physics (foot skate /
+                                penetration), smoothness (jerk / SPARC), joint-limit
+                                violations, and FID / diversity vs the training data
 
 Re-planning period T_p is independent of the action horizon T_a.
 
@@ -46,7 +48,13 @@ from sample_diffusion import (
 )
 from util.g1_obs import heading_yaw_rate, roll_pitch_from_gvec
 from util.kinematics import G1Kinematics
-from util.motion_metrics import rollout_physics_metrics
+from util.motion_metrics import (
+    rollout_physics_metrics,
+    rollout_smoothness_metrics,
+    rollout_limit_metrics,
+    frechet_distance,
+    diversity,
+)
 
 FREQ     = 50.0
 GoalMode = Literal["circle", "zero", "random"]
@@ -263,12 +271,52 @@ def seed_physics(records: list[Record], fk) -> dict[str, float]:
     return rollout_physics_metrics(obs, xy, yaw, fk)
 
 
+def seed_quality(records: list[Record], fk) -> dict[str, float]:
+    """Smoothness + joint-limit violations for one rollout (frame-local, no world frame)."""
+    obs = np.stack([r[0] for r in records])        # (T, 38) denormalized
+    smooth = rollout_smoothness_metrics(obs)
+    limits = rollout_limit_metrics(
+        obs,
+        fk.joint_limits.cpu().numpy(),
+        fk.default_qpos.cpu().numpy(),
+    )
+    return {**smooth, **limits}
+
+
+def mode_distribution(
+    seeds_records: list[list[Record]],
+    ref_frames_norm: np.ndarray,
+    norm_mean: np.ndarray,
+    norm_std: np.ndarray,
+) -> dict[str, float]:
+    """FID (vs the training distribution) and cross-seed diversity for one goal mode.
+
+    Computed in normalized feature space to match eval_generation.py.
+    """
+    # Per-frame FID against the reference: pool all seeds' frames.
+    gen = np.concatenate([np.stack([r[0] for r in recs]) for recs in seeds_records])
+    gen_norm = ((gen - norm_mean) / norm_std).astype(np.float32)
+    fid = frechet_distance(gen_norm, ref_frames_norm)
+
+    # Diversity: mean pairwise L2 among per-seed flattened (normalized) trajectories.
+    T = min(len(recs) for recs in seeds_records)
+    flat = np.stack([
+        ((np.stack([r[0] for r in recs[:T]]) - norm_mean) / norm_std).reshape(-1)
+        for recs in seeds_records
+    ]).astype(np.float32)
+    div = diversity(torch.from_numpy(flat)) if len(seeds_records) > 1 else 0.0
+    return {"fid": float(fid), "diversity": float(div)}
+
+
 def write_log(
     all_records: dict[GoalMode, list[list[Record]]],
     circle: CircleTrajectory,
     out_path: str,
     provenance: list[str] | None = None,
     fk=None,
+    ref_frames_norm: np.ndarray | None = None,
+    norm_mean: np.ndarray | None = None,
+    norm_std: np.ndarray | None = None,
 ) -> None:
     lines = ["Circle trajectory following — tracking error (‖robot − circle(t)‖)",
              "=" * 60, ""]
@@ -292,6 +340,18 @@ def write_log(
             lines.append(f"  physics:  foot_skate={agg['foot_skate']:.4f} m/s  "
                          f"penetration_mean={agg['penetration_mean']:.4f} m  "
                          f"penetration_frac={agg['penetration_frac']:.4f}")
+            qual = [seed_quality(r, fk) for r in seeds_records]
+            q = {k: float(np.mean([p[k] for p in qual])) for k in qual[0]}
+            lines.append(f"  smooth:   jerk_rms={q['jerk_rms']:.2f} rad/s^3  "
+                         f"acc_rms={q['acc_rms']:.2f} rad/s^2  "
+                         f"sparc={q['sparc']:.3f}  root_jerk_rms={q['root_jerk_rms']:.3f} m/s^3")
+            lines.append(f"  limits:   pos_viol_frac={q['joint_pos_viol_frac']:.4f}  "
+                         f"pos_viol_max={q['joint_pos_viol_max']:.4f} rad  "
+                         f"joint_vel_max={q['joint_vel_max']:.2f} rad/s")
+        if ref_frames_norm is not None and norm_mean is not None and norm_std is not None:
+            dist = mode_distribution(seeds_records, ref_frames_norm, norm_mean, norm_std)
+            lines.append(f"  distrib:  fid={dist['fid']:.4f} (vs train, lower=closer)  "
+                         f"diversity={dist['diversity']:.4f} (cross-seed)")
         lines.append("")
 
     text = "\n".join(lines)
@@ -573,7 +633,13 @@ def main() -> None:
         f"cond_steps={cond_steps} goal_dim={goal_dim}  seed_obs=clip{args.clip_idx}/frame{args.frame_idx}",
         f"goal_clip:  {goal_clip}",
     ]
-    write_log(all_records, circle, out_path=str(out_dir / "log.txt"), provenance=provenance, fk=fk)
+    # Reference frame distribution (normalized) for FID, sampled from training data.
+    n_ref = min(20000, dataset.states.shape[0])
+    ref_idx = np.random.default_rng(0).choice(dataset.states.shape[0], size=n_ref, replace=False)
+    ref_frames_norm = dataset.states[ref_idx].cpu().numpy().astype(np.float32)
+
+    write_log(all_records, circle, out_path=str(out_dir / "log.txt"), provenance=provenance,
+              fk=fk, ref_frames_norm=ref_frames_norm, norm_mean=norm_mean, norm_std=norm_std)
 
     print("\nDone.")
 

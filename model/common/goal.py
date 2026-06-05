@@ -11,8 +11,8 @@ class XYGoalConditioner(nn.Module):
     """Compute body-frame XY displacement goal on-the-fly from the action sequence.
 
     During BC pretraining the goal is the integrated endpoint of each horizon
-    chunk (hindsight labeling), plus optional Gaussian noise.  At RL time the
-    caller sets cond["goal"] directly and this module is bypassed.
+    chunk (hindsight labeling), plus optional Gaussian noise. At RL time the
+    caller can set cond["goal"] directly and bypass this module.
 
     Observation layout (physical, post-denorm):
         [0:3]   gvec

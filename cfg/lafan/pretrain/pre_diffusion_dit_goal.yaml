@@ -1,0 +1,87 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+
+_target_: agent.pretrain.train_diffusion_agent.TrainDiffusionAgent
+
+name: lafan_pre_diffusion_dit_goal_ta${horizon_steps}_td${denoising_steps}
+logdir: log/lafan-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: data/lafan/robot_only/train.npz
+norm_stats_path: data/lafan/robot_only/norm_stats.npz
+
+seed: 42
+device: cuda:0
+obs_dim: 38
+action_dim: 38
+goal_dim: 2
+horizon_steps: 50
+cond_steps: 1
+denoising_steps: 20
+
+wandb:
+  entity: mstolzle-drl
+  project: dppo
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  # 4,319,916 windows / batch 512 = 8,437 grad steps/epoch.
+  # 12 epochs ~= 101k steps; save every epoch -> 12 checkpoints across training.
+  n_epochs: 12
+  batch_size: 512
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  lr_scheduler:
+    first_cycle_steps: 12
+    warmup_steps: 0
+    min_lr: 1e-6
+  update_ema_freq: 1
+  save_model_freq: 1
+  log_freq: 1          # per-epoch console summary
+  log_step_freq: 500   # dense logging every 500 grad steps (~17 logs/epoch)
+
+goal_conditioner:
+  _target_: model.common.goal.XYGoalConditioner
+  norm_stats_path: ${norm_stats_path}
+  noise_std: 0.1
+  freq: 50.0
+
+model:
+  _target_: model.diffusion.diffusion.DiffusionModel
+  predict_epsilon: False
+  denoised_clip_value: null
+  # aux_loss_fn:
+  #   _target_: model.diffusion.auxiliary_loss.G1GeometricLoss
+  #   xml_path: /home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml
+  #   norm_stats_path: ${norm_stats_path}
+  #   lambda_ee_pos: 1.0
+  #   lambda_joint_vel: 1.0
+  network:
+    _target_: model.diffusion.dit_diffusion.DiffusionDiT
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+    obs_dim: ${obs_dim}
+    cond_steps: ${cond_steps}
+    goal_dim: ${goal_dim}
+    d_model: 384
+    n_heads: 6
+    n_layers: 6
+    ff_mult: 4
+    dropout: 0.0
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  device: ${device}
+
+ema:
+  decay: 0.999
+
+train_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceDataset
+  dataset_path: ${train_dataset_path}
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  max_n_episodes: 20000
+  device: ${device}

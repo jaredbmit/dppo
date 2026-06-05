@@ -76,6 +76,11 @@ all = [
     "robomimic @ git+https://github.com/ARISE-Initiative/robomimic.git",
     "robosuite @ git+https://github.com/ARISE-Initiative/robosuite.git@v1.4.1",
 ]
+viz = [
+    "trimesh>=4.12.2",
+    "viser>=1.0.30",
+    "yourdfpy>=0.0.60",
+]
 
 [project.urls]
 Homepage = "https://diffusion-ppo.github.io/"
@@ -87,9 +92,9 @@ exclude = []
 exclude = []
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
+torch = { index = "pytorch-cu128" }
 
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true

@@ -43,6 +43,7 @@ from model.diffusion.diffusion import DiffusionModel
 from model.diffusion.mlp_diffusion import DiffusionMLP
 from model.diffusion.dit_diffusion import DiffusionDiT
 from agent.dataset.sequence import StitchedSequenceDataset
+from util.g1_obs import heading_yaw_rate
 
 OBS_DIM = 38
 FREQ = 50.0
@@ -200,12 +201,14 @@ def compute_hindsight_goal(
     mean = mean.to(dev)
     std  = std.to(dev)
 
-    gyro_z = seq[:, 5] * std[5] + mean[5]    # (T_p+1,) physical
+    gvec   = seq[:, 0:3] * std[0:3] + mean[0:3]        # (T_p+1, 3) physical
+    gyro   = seq[:, 3:6] * std[3:6] + mean[3:6]        # (T_p+1, 3) physical
     vel_h  = seq[:, 36:38] * std[36:38] + mean[36:38]  # (T_p+1, 2) physical
+    yaw_rate = heading_yaw_rate(gvec, gyro)            # (T_p+1,)
 
-    # Integrate yaw: yaw[t] = sum(gyro_z[0..t-1]) * dt
+    # Integrate yaw: yaw[t] = sum(yaw_rate[0..t-1]) * dt
     yaw = torch.zeros(len(seq), device=dev)
-    yaw[1:] = torch.cumsum(gyro_z[:-1], dim=0) * dt
+    yaw[1:] = torch.cumsum(yaw_rate[:-1], dim=0) * dt
 
     # Rotate heading-frame velocity into body frame and integrate (exclude last frame)
     cos_y = torch.cos(yaw[:-1])

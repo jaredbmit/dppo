@@ -7,11 +7,11 @@ that predicts the next 38-D observation directly. Each env step accepts
 that prediction as the new state.
 
 Observation layout (normalized, 38-D):
-  [0:3]   gvec  — gravity vector in pelvis frame
-  [3:6]   gyro  — angular velocity in pelvis frame (gyro_z at idx 5)
+  [0:3]   gvec  — gravity vector in pelvis/body frame
+  [3:6]   gyro  — body-local angular velocity
   [6:35]  jpos  — 29 joint positions
   [35]    root_height
-  [36:38] root_vel_xy — horizontal root velocity in pelvis frame
+  [36:38] root_vel_xy — horizontal root velocity in the heading (yaw-only) frame
 
 Action: predicted next 38-D normalized observation (kinematic state transition).
 
@@ -33,8 +33,11 @@ import numpy as np
 import gym
 from gym import spaces
 
+from util.g1_obs import heading_yaw_rate
+
 # Observation layout indices
-IDX_GYRO_Z = 5
+IDX_GVEC = slice(0, 3)
+IDX_GYRO = slice(3, 6)
 IDX_HEIGHT = 35
 IDX_VEL_XY = slice(36, 38)
 
@@ -125,20 +128,23 @@ class G1KinematicEnv(gym.Env):
         """
         dt = 1.0 / FREQ
 
-        # Denormalize velocity and yaw rate from the CURRENT obs
-        gyro_z = (self._current_obs[IDX_GYRO_Z] * self._std[IDX_GYRO_Z]
-                  + self._mean[IDX_GYRO_Z])
+        # Denormalize velocity, gyro and gravity from the CURRENT obs
+        gvec   = (self._current_obs[IDX_GVEC] * self._std[IDX_GVEC]
+                  + self._mean[IDX_GVEC])
+        gyro   = (self._current_obs[IDX_GYRO] * self._std[IDX_GYRO]
+                  + self._mean[IDX_GYRO])
         vel_h  = (self._current_obs[IDX_VEL_XY] * self._std[IDX_VEL_XY]
                   + self._mean[IDX_VEL_XY])
+        yaw_rate = heading_yaw_rate(gvec, gyro)
 
-        # Rotate body-frame velocity into chunk-start body frame
+        # Rotate heading-frame velocity into chunk-start frame
         c = np.cos(self._chunk_rel_yaw)
         s = np.sin(self._chunk_rel_yaw)
         dxy = np.array([c * vel_h[0] - s * vel_h[1],
                         s * vel_h[0] + c * vel_h[1]], dtype=np.float32) * dt
 
         self._chunk_xy      += dxy
-        self._chunk_rel_yaw += gyro_z * dt
+        self._chunk_rel_yaw += yaw_rate * dt
 
         # Advance state
         self._current_obs = action.astype(np.float32)
@@ -258,18 +264,21 @@ class G1KinematicVecEnv:
         truncated  = np.zeros(self.n_envs, dtype=bool)   # hit time limit
 
         for t in range(self.act_steps):
-            # Denormalize gyro_z and vel_xy from current obs
-            gyro_z = (self._obs[:, IDX_GYRO_Z] * self._std[IDX_GYRO_Z]
-                      + self._mean[IDX_GYRO_Z])                          # (N,)
+            # Denormalize gravity, gyro and vel_xy from current obs
+            gvec   = (self._obs[:, IDX_GVEC] * self._std[IDX_GVEC]
+                      + self._mean[IDX_GVEC])                            # (N, 3)
+            gyro   = (self._obs[:, IDX_GYRO] * self._std[IDX_GYRO]
+                      + self._mean[IDX_GYRO])                            # (N, 3)
             vel_h  = (self._obs[:, IDX_VEL_XY] * self._std[IDX_VEL_XY]
                       + self._mean[IDX_VEL_XY])                          # (N, 2)
+            yaw_rate = heading_yaw_rate(gvec, gyro)                      # (N,)
 
-            # Rotate body-frame velocity into chunk-start body frame
+            # Rotate heading-frame velocity into chunk-start frame
             c = np.cos(self._chunk_rel_yaw)
             s = np.sin(self._chunk_rel_yaw)
             self._chunk_xy[:, 0] += (c * vel_h[:, 0] - s * vel_h[:, 1]) * dt
             self._chunk_xy[:, 1] += (s * vel_h[:, 0] + c * vel_h[:, 1]) * dt
-            self._chunk_rel_yaw  += gyro_z * dt
+            self._chunk_rel_yaw  += yaw_rate * dt
 
             # Kinematic transition: predicted obs becomes new state
             np.copyto(self._obs, actions[:, t])

@@ -9,8 +9,8 @@ families:
     positions, reconstructed from the canonical 38-D G1 feature layout via FK.
 
 Canonical feature layout (physical units, post-denorm):
-    [0:3]   gvec
-    [3:6]   gyro            (gyro_z at index 5)
+    [0:3]   gvec            (gravity in body frame)
+    [3:6]   gyro            (body-local angular velocity; gyro_z at index 5)
     [6:35]  joint_pos       (29, MuJoCo qpos[7:] order — FK input)
     [35]    root_height
     [36:38] root_vel_xy     (heading frame)
@@ -22,7 +22,10 @@ import numpy as np
 import torch
 from scipy.linalg import sqrtm
 
-IDX_GYRO_Z = 5
+from util.g1_obs import heading_yaw_rate
+
+IDX_GVEC   = slice(0, 3)
+IDX_GYRO   = slice(3, 6)
 IDX_JPOS   = slice(6, 35)
 IDX_ROOT_H = 35
 IDX_VEL_XY = slice(36, 38)
@@ -127,8 +130,9 @@ def chunk_physics_metrics(
     """Physics metrics for a batch of independent chunks (B, T, 38), normalized.
 
     Each chunk's world frame is reconstructed internally by integrating
-    heading-frame velocity with yaw from gyro_z (anchored at xy=0, yaw=0). Skate
-    and penetration are velocity-/height-based, hence invariant to that anchor.
+    heading-frame velocity with the heading yaw rate (see util.g1_obs), anchored
+    at xy=0, yaw=0. Skate and penetration are velocity-/height-based, hence
+    invariant to that anchor.
     """
     device = fk.default_qpos.device
     x = _as_tensor(feats_norm, device)
@@ -139,12 +143,14 @@ def chunk_physics_metrics(
 
     jpos   = x[..., IDX_JPOS]                              # (B, T, 29)
     root_h = x[..., IDX_ROOT_H]                            # (B, T)
-    gyro_z = x[..., IDX_GYRO_Z]                            # (B, T)
+    gvec   = x[..., IDX_GVEC]                              # (B, T, 3)
+    gyro   = x[..., IDX_GYRO]                              # (B, T, 3)
     vel_h  = x[..., IDX_VEL_XY]                            # (B, T, 2)
+    yaw_rate = heading_yaw_rate(gvec, gyro)                # (B, T)
 
-    # yaw[t] = cumulative gyro_z up to t-1 (yaw[0] = 0)
-    yaw = torch.zeros_like(gyro_z)
-    yaw[:, 1:] = torch.cumsum(gyro_z[:, :-1], dim=1) * dt
+    # yaw[t] = cumulative yaw_rate up to t-1 (yaw[0] = 0)
+    yaw = torch.zeros_like(yaw_rate)
+    yaw[:, 1:] = torch.cumsum(yaw_rate[:, :-1], dim=1) * dt
     # rotate heading-frame velocity to world, integrate to xy (xy[0] = 0)
     cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
     vx = cos_y * vel_h[..., 0] - sin_y * vel_h[..., 1]

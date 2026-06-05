@@ -44,6 +44,7 @@ from sample_diffusion import (
     compute_hindsight_goal,
     OBS_DIM,
 )
+from util.g1_obs import heading_yaw_rate, roll_pitch_from_gvec
 from util.kinematics import G1Kinematics
 from util.motion_metrics import rollout_physics_metrics
 
@@ -112,12 +113,12 @@ def integrate_step(
     world_yaw: float,
     dt: float,
 ) -> tuple[np.ndarray, float]:
-    gyro_z = obs_denorm[5]
+    yaw_rate = heading_yaw_rate(obs_denorm[0:3], obs_denorm[3:6])
     vel_h  = obs_denorm[36:38]
     c, s   = np.cos(world_yaw), np.sin(world_yaw)
     world_xy  = world_xy + np.array([c * vel_h[0] - s * vel_h[1],
                                       s * vel_h[0] + c * vel_h[1]]) * dt
-    world_yaw = world_yaw + gyro_z * dt
+    world_yaw = world_yaw + yaw_rate * dt
     return world_xy, world_yaw
 
 
@@ -129,9 +130,7 @@ def obs_to_qpos(
 ) -> np.ndarray:
     gvec = obs_denorm[0:3].astype(np.float64)
     jpos = obs_denorm[6:35]
-    gx, gy, gz = gvec
-    roll    = np.arctan2(-gy, -gz)
-    pitch   = np.arctan2(gx, np.sqrt(gy * gy + gz * gz))
+    roll, pitch = roll_pitch_from_gvec(gvec)
     R_root  = Rotation.from_euler("ZYX", [world_yaw, pitch, roll])
     xyzw    = R_root.as_quat()
     quat_mj = np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])

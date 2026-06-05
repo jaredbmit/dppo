@@ -5,10 +5,13 @@ dimension, and saves (states, actions, traj_lengths) where actions[t] = obs[t+1]
 
 Feature layout (D=38):
   [0:3]   gvec_pelvis  — gravity direction in pelvis frame (unit vector)
-  [3:6]   gyro_pelvis  — angular velocity in pelvis frame (rad/s)
+  [3:6]   gyro_pelvis  — body-local angular velocity in pelvis frame (rad/s)
   [6:35]  joint_pos    — joint angles minus default_qpos[7:] (rad)
   [35]    root_height  — base z position (m)
-  [36:38] root_vel_xy  — planar velocity in heading frame (m/s)
+  [36:38] root_vel_xy  — planar velocity in the heading (yaw-only) frame (m/s)
+
+Note gyro is body-local but root_vel_xy is heading-frame, so reconstructing world
+root motion needs a heading yaw rate, not gyro_z directly (see util/g1_obs.py).
 
 Outputs written to --out_dir:
   train.npz       states (N,38), actions (N,38), traj_lengths (C,)

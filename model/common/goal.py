@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from util.g1_obs import heading_yaw_rate
+
 
 class XYGoalConditioner(nn.Module):
     """Compute body-frame XY displacement goal on-the-fly from the action sequence.
@@ -15,8 +17,8 @@ class XYGoalConditioner(nn.Module):
     caller can set cond["goal"] directly and bypass this module.
 
     Observation layout (physical, post-denorm):
-        [0:3]   gvec
-        [3:6]   gyro (gyro_z at index 5)
+        [0:3]   gvec  (gravity in body frame)
+        [3:6]   gyro  (body-local angular velocity)
         [6:35]  jpos
         [35]    root_height
         [36:38] root_vel_xy  (heading frame)
@@ -46,13 +48,15 @@ class XYGoalConditioner(nn.Module):
         dt = 1.0 / self.freq
 
         # Denormalize only the channels we need
-        gyro_z = x[:, :, 5]    * self.std[5]    + self.mean[5]      # (B, T)
+        gvec   = x[:, :, 0:3]   * self.std[0:3]   + self.mean[0:3]   # (B, T, 3)
+        gyro   = x[:, :, 3:6]   * self.std[3:6]   + self.mean[3:6]   # (B, T, 3)
         vel_h  = x[:, :, 36:38] * self.std[36:38] + self.mean[36:38] # (B, T, 2)
+        yaw_rate = heading_yaw_rate(gvec, gyro)  # (B, T)
 
         # Yaw at each step (yaw[0] = 0 by convention — goal is body-frame-relative)
-        # yaw[:, t] = sum of gyro_z[:, 0..t-1] * dt
-        yaw = torch.zeros_like(gyro_z)
-        yaw[:, 1:] = torch.cumsum(gyro_z[:, :-1], dim=1) * dt  # (B, T)
+        # yaw[:, t] = sum of yaw_rate[:, 0..t-1] * dt
+        yaw = torch.zeros_like(yaw_rate)
+        yaw[:, 1:] = torch.cumsum(yaw_rate[:, :-1], dim=1) * dt  # (B, T)
 
         # Rotate heading-frame velocity to world frame, then integrate
         cos_y = torch.cos(yaw[:, :-1])  # (B, T-1)

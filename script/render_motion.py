@@ -7,8 +7,8 @@ Observation layout expected in the .npz (physical units, post-denorm):
   [35]    root_height  — base z position (m)
   [36:38] root_vel_xy  — planar velocity in heading frame (m/s)
 
-Yaw is integrated from gyro_z; XY position is integrated from root_vel_xy
-rotated into the world frame.
+Yaw is integrated from the heading yaw rate (see util.g1_obs); XY position is
+integrated from root_vel_xy rotated into the world frame.
 
 Usage:
   uv run python script/render_motion.py \\
@@ -30,6 +30,8 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from util.g1_obs import heading_yaw_rate, roll_pitch_from_gvec
+
 
 def _load_default_qpos(m: mujoco.MjModel) -> np.ndarray:
     kid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "home")
@@ -39,7 +41,7 @@ def _load_default_qpos(m: mujoco.MjModel) -> np.ndarray:
 
 
 def _integrate_trajectory(actions: np.ndarray, freq: float) -> tuple[np.ndarray, np.ndarray]:
-    """Pre-integrate yaw and XY position from gyro_z and root_vel_xy.
+    """Pre-integrate yaw and XY position from the heading yaw rate and root_vel_xy.
 
     Returns:
         yaw: (T,) integrated yaw angles (rad)
@@ -48,12 +50,12 @@ def _integrate_trajectory(actions: np.ndarray, freq: float) -> tuple[np.ndarray,
     T = len(actions)
     dt = 1.0 / freq
 
-    gyro_z   = actions[:, 5]         # (T,)
+    yaw_rate = heading_yaw_rate(actions[:, 0:3], actions[:, 3:6])  # (T,)
     vel_h    = actions[:, 36:38]     # (T, 2) heading-frame velocity
 
     yaw = np.zeros(T)
     for t in range(1, T):
-        yaw[t] = yaw[t - 1] + gyro_z[t - 1] * dt
+        yaw[t] = yaw[t - 1] + yaw_rate[t - 1] * dt
 
     xy = np.zeros((T, 2))
     cos, sin = np.cos(yaw), np.sin(yaw)
@@ -97,9 +99,7 @@ def render_samples(
         gvec = obs[0:3].astype(np.float64)
         jpos = obs[6:35]
 
-        gx, gy, gz = gvec
-        roll  = np.arctan2(-gy, -gz)
-        pitch = np.arctan2(gx, np.sqrt(gy * gy + gz * gz))
+        roll, pitch = roll_pitch_from_gvec(gvec)
         R_root = Rotation.from_euler("ZYX", [yaw[t], pitch, roll])
         xyzw = R_root.as_quat()
         quat_mj = np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])

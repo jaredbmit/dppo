@@ -24,7 +24,10 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-IDX_GYRO_Z = 5
+from util.g1_obs import heading_yaw_rate, roll_pitch_from_gvec
+
+IDX_GVEC = slice(0, 3)
+IDX_GYRO = slice(3, 6)
 IDX_HEIGHT = 35
 IDX_JOINT_POS = slice(6, 35)
 IDX_VEL_XY = slice(36, 38)
@@ -75,10 +78,12 @@ def _integrate_xy_yaw(obs: np.ndarray, freq: float) -> tuple[np.ndarray, np.ndar
     dt = 1.0 / freq
     yaw = np.zeros(n, dtype=np.float64)
     xy = np.zeros((n, 2), dtype=np.float64)
-    gyro_z = obs[:, IDX_GYRO_Z]
+    # Heading yaw rate, not raw gyro_z: these agree only for an upright frame.
+    # Shared with the rest of the pipeline via util.g1_obs.
+    yaw_rate = heading_yaw_rate(obs[:, IDX_GVEC], obs[:, IDX_GYRO])
     vel_h = obs[:, IDX_VEL_XY]
     for t in range(1, n):
-        yaw[t] = yaw[t - 1] + gyro_z[t - 1] * dt
+        yaw[t] = yaw[t - 1] + yaw_rate[t - 1] * dt
         c = np.cos(yaw[t - 1])
         s = np.sin(yaw[t - 1])
         vx_w = c * vel_h[t - 1, 0] - s * vel_h[t - 1, 1]
@@ -89,10 +94,8 @@ def _integrate_xy_yaw(obs: np.ndarray, freq: float) -> tuple[np.ndarray, np.ndar
 
 
 def _root_quat_from_gvec_yaw(gvec: np.ndarray, yaw: float) -> np.ndarray:
-    gx, gy, gz = gvec.astype(np.float64)
-    roll = np.arctan2(-gy, -gz)
-    pitch = np.arctan2(gx, np.sqrt(gy * gy + gz * gz))
-    xyzw = Rotation.from_euler("ZYX", [yaw, pitch, roll]).as_quat()
+    roll, pitch = roll_pitch_from_gvec(gvec.astype(np.float64))
+    xyzw = Rotation.from_euler("ZYX", [yaw, float(pitch), float(roll)]).as_quat()
     return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=np.float64)
 
 

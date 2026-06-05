@@ -115,6 +115,9 @@ class DiffusionDiT(nn.Module):
         goal_dim:      dimension of cond["goal"] (0 to disable goal conditioning).
         d_model/n_heads/n_layers/ff_mult: transformer width / depth.
         dropout:       attention + MLP dropout.
+        cfg_dropout_prob: classifier-free guidance goal-dropout probability used
+                       during training. With this probability each sample's goal
+                       embedding is replaced by a *learned* null embedding.
     """
 
     def __init__(
@@ -129,6 +132,7 @@ class DiffusionDiT(nn.Module):
         n_layers: int = 6,
         ff_mult: int = 4,
         dropout: float = 0.0,
+        cfg_dropout_prob: float = 0.0,
     ) -> None:
         super().__init__()
         self.action_dim = action_dim
@@ -136,6 +140,7 @@ class DiffusionDiT(nn.Module):
         self.obs_dim = obs_dim
         self.cond_steps = cond_steps
         self.goal_dim = goal_dim
+        self.cfg_dropout_prob = cfg_dropout_prob
 
         seq_len = cond_steps + horizon_steps
 
@@ -153,6 +158,8 @@ class DiffusionDiT(nn.Module):
         self.time_emb = TimestepEmbedding(d_model)
         if goal_dim > 0:
             self.goal_proj = nn.Linear(goal_dim, d_model)
+            # Learned "null" goal embedding for classifier-free guidance.
+            self.null_goal = nn.Parameter(torch.zeros(1, d_model))
 
         self.blocks = nn.ModuleList(
             [DiTBlock(d_model, n_heads, ff_mult, dropout) for _ in range(n_layers)]
@@ -162,6 +169,8 @@ class DiffusionDiT(nn.Module):
 
         nn.init.normal_(self.pos_emb, std=0.02)
         nn.init.normal_(self.seg_emb, std=0.02)
+        if goal_dim > 0:
+            nn.init.normal_(self.null_goal, std=0.02)
 
         n_params = sum(p.numel() for p in self.parameters())
         log.info(f"DiffusionDiT parameters: {n_params:,}")
@@ -200,8 +209,24 @@ class DiffusionDiT(nn.Module):
 
         # --- AdaLN conditioning: timestep (+ goal) ---
         c = self.time_emb(time.reshape(B))
-        if self.goal_dim > 0 and cond.get("goal") is not None:
-            c = c + self.goal_proj(cond["goal"].reshape(B, self.goal_dim))
+        if self.goal_dim > 0:
+            goal = cond.get("goal")
+            null = self.null_goal.expand(B, -1)  # (B, d_model)
+            if goal is not None:
+                goal_emb = self.goal_proj(goal.reshape(B, self.goal_dim))
+            else:
+                # No goal supplied -> fully unconditional (learned null token).
+                goal_emb = null
+
+            # Classifier-free guidance goal dropout. An explicit per-sample mask in
+            # cond["goal_drop"] (used at sampling time for guidance) takes priority
+            drop = cond.get("goal_drop")
+            if drop is None and self.training and self.cfg_dropout_prob > 0:
+                drop = torch.rand(B, device=x.device) < self.cfg_dropout_prob
+            if drop is not None:
+                goal_emb = torch.where(drop.reshape(B, 1), null, goal_emb)
+
+            c = c + goal_emb
 
         for block in self.blocks:
             tokens = block(tokens, c)

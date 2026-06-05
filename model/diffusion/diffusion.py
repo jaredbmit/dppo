@@ -44,6 +44,7 @@ class DiffusionModel(nn.Module):
         # DDPM parameters
         denoising_steps=100,
         predict_epsilon=True,
+        cfg_scale=None,  # >1.0 enables classifier-free guidance at sampling
         # DDIM sampling
         use_ddim=False,
         ddim_discretize="uniform",
@@ -59,6 +60,7 @@ class DiffusionModel(nn.Module):
         self.action_dim = action_dim
         self.denoising_steps = int(denoising_steps)
         self.predict_epsilon = predict_epsilon
+        self.cfg_scale = cfg_scale
         self.use_ddim = use_ddim
         self.ddim_steps = ddim_steps
 
@@ -202,10 +204,23 @@ class DiffusionModel(nn.Module):
     # ---------- Sampling ----------#
 
     def p_mean_var(self, x, t, cond, index=None, network_override=None):
-        if network_override is not None:
-            noise = network_override(x, t, cond=cond)
+        net = network_override if network_override is not None else self.network
+        cfg_scale = getattr(self, "cfg_scale", None)
+        if cfg_scale is None or cfg_scale == 1.0 or cond.get("goal") is None:
+            noise = net(x, t, cond=cond)
         else:
-            noise = self.network(x, t, cond=cond)
+            # CFG: batch [conditional | unconditional(null goal)] in one pass.
+            B = x.shape[0]
+            cond2 = {
+                k: (torch.cat([v, v], 0) if torch.is_tensor(v) else v)
+                for k, v in cond.items()
+            }
+            drop = torch.zeros(2 * B, dtype=torch.bool, device=x.device)
+            drop[B:] = True
+            cond2["goal_drop"] = drop
+            out = net(torch.cat([x, x], 0), torch.cat([t, t], 0), cond=cond2)
+            cond_out, uncond_out = out[:B], out[B:]
+            noise = uncond_out + cfg_scale * (cond_out - uncond_out)
 
         # Predict x_0
         if self.predict_epsilon:

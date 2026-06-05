@@ -33,16 +33,20 @@ import matplotlib.pyplot as plt
 import mujoco
 import numpy as np
 import torch
-import yaml
 from scipy.spatial.transform import Rotation
 
 from model.diffusion.diffusion import DiffusionModel
-from model.diffusion.mlp_diffusion import DiffusionMLP
-from model.diffusion.dit_diffusion import DiffusionDiT
 from agent.dataset.sequence import StitchedSequenceDataset
-from sample_diffusion import resolve_data_dir
+from sample_diffusion import (
+    load_model,
+    load_run_cfg,
+    resolve_data_dir,
+    compute_hindsight_goal,
+    OBS_DIM,
+)
+from util.kinematics import G1Kinematics
+from util.motion_metrics import rollout_physics_metrics
 
-OBS_DIM  = 38
 FREQ     = 50.0
 GoalMode = Literal["circle", "zero", "random"]
 
@@ -53,93 +57,8 @@ MODE_STYLE = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Model loading
-# ---------------------------------------------------------------------------
-
-def _load_run_cfg(checkpoint_path: str) -> dict:
-    cfg_path = Path(checkpoint_path).parent.parent / ".hydra" / "config.yaml"
-    if not cfg_path.exists():
-        return {}
-    with open(cfg_path) as f:
-        return yaml.safe_load(f)
-
-
-def load_model(
-    checkpoint_path: str,
-    cond_steps: int,
-    horizon_steps: int,
-    action_dim: int,
-    denoising_steps: int,
-    goal_dim: int,
-    device: str,
-    obs_dim: int = OBS_DIM,
-    cfg: dict = {},
-) -> DiffusionModel:
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    sd = ckpt.get("ema", ckpt.get("model"))
-    # Pretrain configs put the net under model.network; finetune under model.actor.
-    model_cfg = cfg.get("model", {})
-    net_cfg = model_cfg.get("network") or model_cfg.get("actor") or {}
-    target = net_cfg.get("_target_", "")
-
-    # Finetune checkpoints carry frozen `network.*`/`actor.*` plus the tuned
-    # `actor_ft.*`. Select the fine-tuned policy and remap onto `network.*`.
-    if any(k.startswith("actor_ft.") for k in sd):
-        sd = {
-            "network." + k[len("actor_ft."):]: v
-            for k, v in sd.items()
-            if k.startswith("actor_ft.")
-        }
-
-    # Build the same network architecture the checkpoint was trained with.
-    if target.endswith("DiffusionDiT"):
-        network = DiffusionDiT(
-            action_dim=action_dim,
-            horizon_steps=horizon_steps,
-            obs_dim=obs_dim,
-            cond_steps=cond_steps,
-            goal_dim=goal_dim,
-            d_model=net_cfg.get("d_model", 256),
-            n_heads=net_cfg.get("n_heads", 4),
-            n_layers=net_cfg.get("n_layers", 6),
-            ff_mult=net_cfg.get("ff_mult", 4),
-            dropout=net_cfg.get("dropout", 0.0),
-        )
-    else:
-        network = DiffusionMLP(
-            action_dim=action_dim,
-            horizon_steps=horizon_steps,
-            cond_dim=obs_dim * cond_steps,
-            goal_dim=goal_dim,
-            time_dim=net_cfg.get("time_dim", 64),
-            mlp_dims=net_cfg.get("mlp_dims", [512] * 13),
-            activation_type=net_cfg.get("activation_type", "ReLU"),
-            out_activation_type=net_cfg.get("out_activation_type", "Identity"),
-            use_layernorm=net_cfg.get("use_layernorm", False),
-            residual_style=net_cfg.get("residual_style", True),
-        )
-    model = DiffusionModel(
-        network=network,
-        horizon_steps=horizon_steps,
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        denoising_steps=denoising_steps,
-        predict_epsilon=False,
-        denoised_clip_value=None,
-        device=device,
-    )
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    # network.* params should all load; surface a real architecture mismatch
-    # instead of silently running a randomly-initialized model.
-    net_missing = [k for k in missing if k.startswith("network.")]
-    if net_missing:
-        raise RuntimeError(
-            f"{len(net_missing)} network params not found in checkpoint "
-            f"(architecture mismatch?). First few: {net_missing[:5]}"
-        )
-    model.eval()
-    return model
+# Model loading (load_model, load_run_cfg) lives in sample_diffusion.py so eval
+# scripts share one checkpoint-loading code path.
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +98,12 @@ def world_to_body(dx_world: np.ndarray, yaw: float) -> np.ndarray:
     c, s = np.cos(yaw), np.sin(yaw)
     return np.array([c * dx_world[0] + s * dx_world[1],
                      -s * dx_world[0] + c * dx_world[1]])
+
+
+def body_to_world(dx_body: np.ndarray, yaw: float) -> np.ndarray:
+    c, s = np.cos(yaw), np.sin(yaw)
+    return np.array([c * dx_body[0] - s * dx_body[1],
+                     s * dx_body[0] + c * dx_body[1]])
 
 
 def integrate_step(
@@ -226,6 +151,31 @@ Record = tuple[np.ndarray, np.ndarray, float, np.ndarray]
 
 
 @torch.no_grad()
+def training_goal_norms(
+    dataset: StitchedSequenceDataset,
+    norm_mean: np.ndarray,
+    norm_std: np.ndarray,
+    horizon_steps: int,
+    n_samples: int = 2000,
+    seed: int = 0,
+) -> np.ndarray:
+    """Sample hindsight goal norms over training windows (same labeling as training)."""
+    rng = np.random.default_rng(seed)
+    mean_t = torch.from_numpy(norm_mean).float().to(dataset.states.device)
+    std_t  = torch.from_numpy(norm_std).float().to(dataset.states.device)
+    starts = [s for (s, _) in dataset.indices]
+    pick = rng.choice(len(starts), size=min(n_samples, len(starts)), replace=False)
+    norms = []
+    for i in pick:
+        start = starts[i]
+        context = dataset.states[start]                              # anchor frame
+        chunk   = dataset.actions[start:start + horizon_steps]       # (H, D)
+        goal = compute_hindsight_goal(chunk, context, mean_t, std_t)  # (1, 2)
+        norms.append(float(torch.linalg.norm(goal)))
+    return np.array(norms)
+
+
+@torch.no_grad()
 def eval_circle(
     model: DiffusionModel,
     circle: CircleTrajectory,
@@ -239,6 +189,7 @@ def eval_circle(
     device: str,
     goal_mode: GoalMode = "circle",
     seed: int = 0,
+    goal_clip: float | None = None,
 ) -> list[Record]:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -263,6 +214,13 @@ def eval_circle(
             c, s = np.cos(world_yaw), np.sin(world_yaw)
             xy_goal_world = world_xy + np.array([c * goal_body[0] - s * goal_body[1],
                                                   s * goal_body[0] + c * goal_body[1]])
+
+        # Clamp the commanded goal to the training goal-norm range.
+        if goal_clip is not None:
+            n = float(np.linalg.norm(goal_body))
+            if n > goal_clip:
+                goal_body = goal_body * (goal_clip / n)
+                xy_goal_world = world_xy + body_to_world(goal_body, world_yaw)
 
         goal_t  = torch.tensor(goal_body, dtype=torch.float32, device=device).unsqueeze(0)
         state_t = torch.stack(list(obs_buf)).unsqueeze(0).to(device)
@@ -298,11 +256,20 @@ def seed_metric(records: list[Record], circle: CircleTrajectory) -> dict[str, fl
     return {"mean": float(d.mean()), "std": float(d.std()), "max": float(d.max())}
 
 
+def seed_physics(records: list[Record], fk) -> dict[str, float]:
+    """Foot-skate / penetration for one rollout, using its integrated world frame."""
+    obs = np.stack([r[0] for r in records])        # (T, 38) denormalized
+    xy  = np.stack([r[1] for r in records])        # (T, 2)
+    yaw = np.array([r[2] for r in records])        # (T,)
+    return rollout_physics_metrics(obs, xy, yaw, fk)
+
+
 def write_log(
     all_records: dict[GoalMode, list[list[Record]]],
     circle: CircleTrajectory,
     out_path: str,
     provenance: list[str] | None = None,
+    fk=None,
 ) -> None:
     lines = ["Circle trajectory following — tracking error (‖robot − circle(t)‖)",
              "=" * 60, ""]
@@ -320,6 +287,12 @@ def write_log(
         agg_std  = float(np.std(seed_means))
         lines.append(f"  aggregate ({len(seeds_records)} seeds):  "
                      f"mean={agg_mean:.4f} ± {agg_std:.4f} m")
+        if fk is not None:
+            phys = [seed_physics(r, fk) for r in seeds_records]
+            agg = {k: float(np.mean([p[k] for p in phys])) for k in phys[0]}
+            lines.append(f"  physics:  foot_skate={agg['foot_skate']:.4f} m/s  "
+                         f"penetration_mean={agg['penetration_mean']:.4f} m  "
+                         f"penetration_frac={agg['penetration_frac']:.4f}")
         lines.append("")
 
     text = "\n".join(lines)
@@ -474,12 +447,20 @@ def main() -> None:
     ap.add_argument("--duration",        type=float, default=10.0)
     # Planning
     ap.add_argument("--replan_steps",    type=int,   default=None)
+    # Goal clamping (keeps commanded goal within the training goal-norm range)
+    ap.add_argument("--goal_clip",       type=float, default=None,
+                    help="max ||goal|| in meters; overrides --goal_clip_pct")
+    ap.add_argument("--goal_clip_pct",   type=float, default=None,
+                    help="clamp goal norm to this percentile of the training goal "
+                         "distribution (e.g. 95). Ignored if --goal_clip is set.")
     # Model overrides
     ap.add_argument("--obs_dim",         type=int,   default=None)
     ap.add_argument("--goal_dim",        type=int,   default=None)
     ap.add_argument("--cond_steps",      type=int,   default=None)
     ap.add_argument("--horizon_steps",   type=int,   default=None)
     ap.add_argument("--denoising_steps", type=int,   default=None)
+    ap.add_argument("--cfg_scale",       type=float, default=None,
+                    help="classifier-free guidance scale; None/1.0 = no CFG")
     # Seed obs
     ap.add_argument("--clip_idx",        type=int,   default=0)
     ap.add_argument("--frame_idx",       type=int,   default=0)
@@ -491,7 +472,7 @@ def main() -> None:
     ap.add_argument("--device",          type=str,   default="cuda:0")
     args = ap.parse_args()
 
-    cfg             = _load_run_cfg(args.checkpoint)
+    cfg             = load_run_cfg(args.checkpoint)
     if args.data_dir is None:
         args.data_dir = resolve_data_dir(cfg)
         if args.data_dir is None:
@@ -522,8 +503,11 @@ def main() -> None:
 
     model = load_model(
         args.checkpoint, cond_steps, horizon_steps, action_dim, denoising_steps,
-        goal_dim, args.device, obs_dim=obs_dim, cfg=cfg,
+        args.device, obs_dim=obs_dim, goal_dim=goal_dim, cfg=cfg,
     )
+    model.cfg_scale = args.cfg_scale
+
+    fk = G1Kinematics(args.xml_path).to(args.device)
 
     dataset = StitchedSequenceDataset(
         dataset_path=str(args.data_dir / "train.npz"),
@@ -537,10 +521,23 @@ def main() -> None:
 
     circle = CircleTrajectory(center=np.array([0.0, 0.0]), radius=args.radius, speed=args.speed)
 
+    # Report the training goal-norm distribution and resolve the clamp threshold.
+    g = training_goal_norms(dataset, norm_mean, norm_std, horizon_steps)
+    pcts = {p: float(np.percentile(g, p)) for p in (50, 90, 95, 99)}
+    print(f"Training goal norms (m): mean={g.mean():.3f} "
+          f"p50={pcts[50]:.3f} p90={pcts[90]:.3f} p95={pcts[95]:.3f} "
+          f"p99={pcts[99]:.3f} max={g.max():.3f}")
+    goal_clip = args.goal_clip
+    if goal_clip is None and args.goal_clip_pct is not None:
+        goal_clip = float(np.percentile(g, args.goal_clip_pct))
+    if goal_clip is not None:
+        print(f"Clamping commanded goal norm to {goal_clip:.3f} m")
+
     eval_kwargs = dict(
         model=model, circle=circle, norm_mean=norm_mean, norm_std=norm_std,
         seed_obs_norm=seed_obs, horizon_steps=horizon_steps, cond_steps=cond_steps,
         replan_steps=replan_steps, total_steps=total_steps, device=args.device,
+        goal_clip=goal_clip,
     )
     render_kwargs = dict(
         circle=circle, xml_path=args.xml_path, fps=int(FREQ),
@@ -575,8 +572,9 @@ def main() -> None:
         f"circle:     radius={args.radius}m speed={args.speed}m/s duration={args.duration}s",
         f"planning:   horizon={horizon_steps} replan={replan_steps} denoising={denoising_steps} "
         f"cond_steps={cond_steps} goal_dim={goal_dim}  seed_obs=clip{args.clip_idx}/frame{args.frame_idx}",
+        f"goal_clip:  {goal_clip}",
     ]
-    write_log(all_records, circle, out_path=str(out_dir / "log.txt"), provenance=provenance)
+    write_log(all_records, circle, out_path=str(out_dir / "log.txt"), provenance=provenance, fk=fk)
 
     print("\nDone.")
 

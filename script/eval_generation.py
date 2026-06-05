@@ -40,28 +40,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from scipy.linalg import sqrtm
 
 from agent.dataset.sequence import StitchedSequenceDataset
 from sample_diffusion import load_model, load_norm_stats, load_run_cfg, resolve_data_dir, OBS_DIM
-
-
-def frechet_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Fréchet distance between two sets of per-frame features (N, D)."""
-    mu_a, mu_b = a.mean(0), b.mean(0)
-    ca = np.cov(a, rowvar=False)
-    cb = np.cov(b, rowvar=False)
-    covmean = sqrtm(ca @ cb)
-    if np.iscomplexobj(covmean):
-        covmean = covmean.real
-    return float(((mu_a - mu_b) ** 2).sum() + np.trace(ca + cb - 2 * covmean))
-
-
-def _diversity(chunks_flat: torch.Tensor) -> float:
-    """Mean pairwise L2 among (N, F) chunk embeddings."""
-    pair = torch.cdist(chunks_flat, chunks_flat)
-    n = pair.shape[0]
-    return (pair.sum() / (n * (n - 1))).item()
+from util.kinematics import G1Kinematics
+from util.motion_metrics import frechet_distance, diversity, chunk_physics_metrics
 
 
 def _gather_windows(source: torch.Tensor, starts: torch.Tensor, L: int) -> torch.Tensor:
@@ -120,6 +103,10 @@ def main() -> None:
     ap.add_argument("--cond_steps", type=int, default=None)
     ap.add_argument("--horizon_steps", type=int, default=None)
     ap.add_argument("--denoising_steps", type=int, default=None)
+    ap.add_argument("--cfg_scale", type=float, default=None,
+                    help="classifier-free guidance scale; None/1.0 = no CFG")
+    ap.add_argument("--xml_path", type=str, default=None,
+                    help="G1 scene XML for physics metrics (default: from run config)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -153,6 +140,13 @@ def main() -> None:
           f"horizon={L}, denoising={denoising_steps})...")
     model = load_model(args.checkpoint, cond_steps, L, action_dim, denoising_steps,
                        args.device, obs_dim=obs_dim, goal_dim=goal_dim, cfg=cfg)
+    model.cfg_scale = args.cfg_scale
+
+    # FK for physics metrics; xml_path from CLI or the run's aux-loss config.
+    xml_path = args.xml_path or (cfg.get("model", {}).get("aux_loss_fn", {}) or {}).get("xml_path")
+    fk = G1Kinematics(xml_path).to(args.device) if xml_path else None
+    if fk is None:
+        print("No xml_path (CLI or config) — skipping physics metrics.")
 
     print("Loading dataset...")
     ds = StitchedSequenceDataset(
@@ -206,7 +200,15 @@ def main() -> None:
     fid = frechet_distance(gen_frames, ref_frames)
     mean_err = float(np.abs(gen_frames.mean(0) - ref_frames.mean(0)).mean())
     std_err  = float(np.abs(gen_frames.std(0)  - ref_frames.std(0)).mean())
-    div = _diversity(gen_flat.cpu().float())
+    div = diversity(gen_flat.cpu().float())
+
+    # --- physics metrics (foot skate / penetration), gen vs real for calibration ---
+    phys_gen, phys_real = {}, {}
+    if fk is not None:
+        print("Computing physics metrics (foot skate, penetration)...")
+        real_chunks = pool[fid_idx].reshape(fid_ref_size, L, action_dim)
+        phys_gen  = chunk_physics_metrics(gen, mean, std, fk)
+        phys_real = chunk_physics_metrics(real_chunks, mean, std, fk)
 
     summary = {
         "checkpoint": args.checkpoint,
@@ -227,6 +229,9 @@ def main() -> None:
         "diversity": div,
         "mean_err": mean_err,
         "std_err": std_err,
+        # physics (compare gen vs real; gen close to real = physically plausible)
+        "physics_gen": phys_gen,
+        "physics_real": phys_real,
         "interpretation": ("ratio<<1 => memorization; ratio~1 => generalization. "
                            "near_copy_fraction = frac of samples within 25% of the "
                            "median real NN distance (near-exact copies). "
@@ -248,7 +253,15 @@ def main() -> None:
     print(f"  diversity:          {div:.4f}   (higher = more varied)")
     print(f"  mean_err:           {mean_err:.4f}   (L1 err of per-feature means)")
     print(f"  std_err:            {std_err:.4f}   (L1 err of per-feature stds)")
-    print("=====================================================\n")
+    print("=====================================================")
+    if phys_gen:
+        print("\n================ PHYSICS (gen vs real) ==============")
+        print(f"  foot_skate (m/s):   {phys_gen['foot_skate']:.4f}  vs real {phys_real['foot_skate']:.4f}")
+        print(f"  penetration_mean:   {phys_gen['penetration_mean']:.4f}  vs real {phys_real['penetration_mean']:.4f}")
+        print(f"  penetration_frac:   {phys_gen['penetration_frac']:.4f}  vs real {phys_real['penetration_frac']:.4f}")
+        print(f"  contact_frac:       {phys_gen['contact_frac']:.4f}  vs real {phys_real['contact_frac']:.4f}")
+        print("  (gen close to real = physically plausible; lower skate/penetration better)")
+        print("=====================================================\n")
 
     # histogram
     fig, axes = plt.subplots(1, 2, figsize=(13, 4))

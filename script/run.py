@@ -44,6 +44,12 @@ def main(cfg: OmegaConf):
     # resolve immediately so all the ${now:} resolvers will use the same time.
     OmegaConf.resolve(cfg)
 
+    # Enable TF32 matmuls on Ampere+ GPUs (e.g. RTX 4090). Near-lossless for
+    # training and ~1.3-1.8x faster on the matmul-heavy DiT denoiser.
+    import torch
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.allow_tf32 = True
+
     # For pre-training: download dataset if needed
     if "train_dataset_path" in cfg and not os.path.exists(cfg.train_dataset_path):
         download_url = get_dataset_download_url(cfg)

@@ -88,7 +88,15 @@ def resolve_data_dir(cfg: dict) -> Path | None:
 def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action_dim: int, denoising_steps: int, device: str, obs_dim: int = OBS_DIM, goal_dim: int = 0, cfg: dict = {}) -> DiffusionModel:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     sd = ckpt.get("ema", ckpt.get("model"))
-    net_cfg = cfg.get("model", {}).get("network", {})
+    # DPPO finetune checkpoints hold several sub-modules under "model"
+    if any(k.startswith("actor_ft.") for k in sd):
+        sd = {"network." + k[len("actor_ft."):]: v
+              for k, v in sd.items() if k.startswith("actor_ft.")}
+        print("Detected DPPO finetune checkpoint: loading actor_ft.* as the policy.")
+    model_cfg = cfg.get("model", {})
+    net_cfg = model_cfg.get("network") or {}
+    if not net_cfg.get("_target_"):
+        net_cfg = model_cfg.get("actor") or {}
     # Pick the network class from the training config's network _target_.
     if net_cfg.get("_target_", "").endswith("DiffusionDiT"):
         network = DiffusionDiT(
@@ -126,7 +134,13 @@ def load_model(checkpoint_path: str, cond_steps: int, horizon_steps: int, action
         denoised_clip_value=None,
         device=device,
     )
-    model.load_state_dict(sd, strict=False)
+    missing, _ = model.load_state_dict(sd, strict=False)
+    net_missing = [k for k in missing if k.startswith("network.")]
+    if net_missing:
+        raise RuntimeError(
+            f"{len(net_missing)} network params not found in checkpoint "
+            f"(architecture mismatch?). First few: {net_missing[:5]}"
+        )
     model.eval()
     return model
 
@@ -301,7 +315,8 @@ def sample_autoregressive(
         goal = torch.zeros(1, goal_dim) if goal_dim > 0 else None
         chunk = sample_chunk(model, buf, cond_steps, device, goal=goal)  # (T_p, 38) normalized
         all_actions.append(denorm(chunk, mean, std))
-        buf.append(torch.from_numpy(chunk[-1].astype(np.float32)).to(clip_states.device))
+        for frame in chunk[-cond_steps:]:
+            buf.append(torch.from_numpy(frame.astype(np.float32)).to(clip_states.device))
         t += horizon_steps
     return {
         "actions": np.concatenate(all_actions, axis=0),

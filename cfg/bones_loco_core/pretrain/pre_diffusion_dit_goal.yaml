@@ -15,9 +15,9 @@ device: cuda:0
 obs_dim: 38
 action_dim: 38
 goal_dim: 2
-horizon_steps: 50
+horizon_steps: 40
 cond_steps: 1
-denoising_steps: 20
+denoising_steps: 8
 
 wandb:
   entity: jaredb-drl
@@ -25,9 +25,7 @@ wandb:
   run: ${now:%H-%M-%S}_${name}
 
 train:
-  # 4,319,916 windows / batch 512 = 8,437 grad steps/epoch.
-  # 12 epochs ~= 101k steps; save every epoch -> 12 checkpoints across training.
-  n_epochs: 12
+  n_epochs: 10
   batch_size: 512
   learning_rate: 1e-4
   weight_decay: 0.0

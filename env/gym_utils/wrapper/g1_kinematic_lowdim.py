@@ -16,7 +16,9 @@ Observation layout (normalized, 38-D):
 Action: predicted next 38-D normalized observation (kinematic state transition).
 
 Goal: 2-D body-frame XY displacement to accumulate over horizon_steps steps.
-  Resampled every horizon_steps steps; returned in cond["goal"].
+  Resampled every horizon_steps steps; returned in cond["goal"]. Goals are drawn
+  to match the measured hindsight-goal distribution (see util.goal_bank), not an
+  isotropic disk, so RL commands stay in-distribution for the BC prior.
 
 Reward: negative Euclidean distance between accumulated body-frame XY
   displacement and the goal, computed each step.
@@ -34,6 +36,7 @@ import gym
 from gym import spaces
 
 from util.g1_obs import heading_yaw_rate
+from util.goal_bank import GoalBankSampler, load_or_build_goal_bank
 
 # Observation layout indices
 IDX_GVEC = slice(0, 3)
@@ -69,7 +72,7 @@ class G1KinematicEnv(gym.Env):
         self.horizon_steps = horizon_steps
         self.max_episode_steps = max_episode_steps
         self.min_height = min_height
-        self.goal_range = goal_range
+        self.goal_range = goal_range  # retained for cfg compat; unused (empirical sampler)
 
         stats = np.load(norm_stats_path)
         self._mean = stats["mean"].astype(np.float32)   # (38,)
@@ -77,6 +80,11 @@ class G1KinematicEnv(gym.Env):
 
         data = np.load(dataset_path)
         self._states = data["states"].astype(np.float32)  # (N, 38) normalized
+
+        # Goals are sampled to match the measured hindsight-goal distribution
+        # (anisotropic, horizon-dependent) rather than an isotropic disk.
+        bank, cov = load_or_build_goal_bank(dataset_path, horizon_steps)
+        self._goal_sampler = GoalBankSampler(bank, cov)
 
         obs_dim  = self._mean.shape[0]   # 38
         goal_dim = 2
@@ -179,10 +187,8 @@ class G1KinematicEnv(gym.Env):
     # ---------------------------------------------------------------------- #
 
     def _sample_goal(self) -> np.ndarray:
-        """Sample a random body-frame XY displacement reachable in horizon_steps."""
-        r     = np.random.uniform(0, self.goal_range)
-        theta = np.random.uniform(-np.pi, np.pi)
-        return np.array([r * np.cos(theta), r * np.sin(theta)], dtype=np.float32)
+        """Sample a body-frame XY displacement matching the measured goal distribution."""
+        return self._goal_sampler.sample(1)[0]
 
 
 class G1KinematicVecEnv:
@@ -217,7 +223,7 @@ class G1KinematicVecEnv:
         self.horizon_steps    = horizon_steps
         self.max_episode_steps = max_episode_steps
         self.min_height       = min_height
-        self.goal_range       = goal_range
+        self.goal_range       = goal_range  # retained for cfg compat; unused (empirical sampler)
         self.n_obs_steps      = n_obs_steps
         self.act_steps        = act_steps
 
@@ -226,6 +232,11 @@ class G1KinematicVecEnv:
         self._std  = stats["std"].astype(np.float32)    # (obs_dim,)
 
         self._dataset = np.load(dataset_path)["states"].astype(np.float32)  # (D, obs_dim)
+
+        # Goals match the measured hindsight-goal distribution (anisotropic,
+        # horizon-dependent), not an isotropic disk. Built/cached per horizon.
+        bank, cov = load_or_build_goal_bank(dataset_path, horizon_steps)
+        self._goal_sampler = GoalBankSampler(bank, cov)
 
         self.obs_dim  = self._mean.shape[0]   # 38
         self.goal_dim = 2
@@ -355,6 +366,4 @@ class G1KinematicVecEnv:
         self._obs_hist[mask]  = self._obs[mask,  None, :]   # broadcasts over n_obs_steps
 
     def _sample_goals(self, n: int) -> np.ndarray:
-        r     = np.random.uniform(0.0, self.goal_range, size=n).astype(np.float32)
-        theta = np.random.uniform(-np.pi, np.pi,        size=n).astype(np.float32)
-        return np.stack([r * np.cos(theta), r * np.sin(theta)], axis=1)
+        return self._goal_sampler.sample(n)

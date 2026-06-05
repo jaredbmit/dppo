@@ -8,18 +8,18 @@ _target_: agent.finetune.train_ppo_diffusion_agent.TrainPPODiffusionAgent
 
 name: bones_loco_core_ft_ppo_diffusion_dit_goal_ta${horizon_steps}_td${denoising_steps}_tdf${ft_denoising_steps}
 logdir: log/bones_loco_core-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
-base_policy_path: ???
+base_policy_path: log/bones_loco_core-pretrain/bones_loco_core_pre_diffusion_dit_goal_ta40_td8/2026-06-05_14-45-35_42/checkpoint/state_10.pt
 
 seed: 42
 device: cuda:0
 obs_dim: 38
 goal_dim: 2
 action_dim: 38
-denoising_steps: 20
-ft_denoising_steps: 10
+denoising_steps: 8
+ft_denoising_steps: 8
 cond_steps: 1
-horizon_steps: 50
-act_steps: 50
+horizon_steps: 40
+act_steps: 40
 
 wandb:
   entity: jaredb-drl
@@ -38,12 +38,11 @@ env:
     norm_stats_path: data/bones_loco_core/norm_stats.npz
     dataset_path: data/bones_loco_core/train.npz
     horizon_steps: ${horizon_steps}
-    goal_range: 2.0
     obs_steps: ${cond_steps}
     act_steps: ${act_steps}
 
 train:
-  n_train_itr: 2000
+  n_train_itr: 1000
   n_critic_warmup_itr: 50
   n_steps: 1
   gamma: 0.99
@@ -69,11 +68,13 @@ train:
   reward_scale_running: True
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 1024
+  batch_size: 256
   update_epochs: 1
   vf_coef: 0.5
   target_kl: 1
-  logprob_batch_size: 1024
+  logprob_batch_size: 256
+  use_bc_loss: True
+  bc_loss_coeff: 0.1
 
 model:
   _target_: model.diffusion.diffusion_ppo.PPODiffusion

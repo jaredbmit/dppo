@@ -159,7 +159,6 @@ class DiffusionModel(nn.Module):
         In DDIM paper https://arxiv.org/pdf/2010.02502, alpha is alpha_cumprod in DDPM https://arxiv.org/pdf/2102.09672
         """
         if use_ddim:
-            assert predict_epsilon, "DDIM requires predicting epsilon for now."
             if ddim_discretize == "uniform":  # use the HF "leading" style
                 step_ratio = self.denoising_steps // ddim_steps
                 self.ddim_t = (
@@ -222,37 +221,44 @@ class DiffusionModel(nn.Module):
             cond_out, uncond_out = out[:B], out[B:]
             noise = uncond_out + cfg_scale * (cond_out - uncond_out)
 
-        # Predict x_0
+        # Convert the network output to (x₀, ε).
+        if self.use_ddim:
+            alpha = extract(self.ddim_alphas, index, x.shape)
+            alpha_prev = extract(self.ddim_alphas_prev, index, x.shape)
+            sqrt_one_minus_alpha = extract(
+                self.ddim_sqrt_one_minus_alphas, index, x.shape
+            )
+
         if self.predict_epsilon:
+            epsilon = noise
             if self.use_ddim:
                 """
                 x₀ = (xₜ - √ (1-αₜ) ε )/ √ αₜ
                 """
-                alpha = extract(self.ddim_alphas, index, x.shape)
-                alpha_prev = extract(self.ddim_alphas_prev, index, x.shape)
-                sqrt_one_minus_alpha = extract(
-                    self.ddim_sqrt_one_minus_alphas, index, x.shape
-                )
-                x_recon = (x - sqrt_one_minus_alpha * noise) / (alpha**0.5)
+                x_recon = (x - sqrt_one_minus_alpha * epsilon) / (alpha**0.5)
             else:
                 """
                 x₀ = √ 1\α̅ₜ xₜ - √ 1\α̅ₜ-1 ε
                 """
                 x_recon = (
                     extract(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
-                    - extract(self.sqrt_recipm1_alphas_cumprod, t, x.shape) * noise
+                    - extract(self.sqrt_recipm1_alphas_cumprod, t, x.shape) * epsilon
                 )
-        else:  # directly predicting x₀
+        else:  # network directly predicts x₀
             x_recon = noise
+            if self.use_ddim:
+                # implied ε from predicted x₀:  ε = (xₜ - √αₜ x₀) / √(1-αₜ)
+                epsilon = (x - (alpha**0.5) * x_recon) / sqrt_one_minus_alpha
+
         if self.denoised_clip_value is not None:
             x_recon.clamp_(-self.denoised_clip_value, self.denoised_clip_value)
             if self.use_ddim:
-                # re-calculate noise based on clamped x_recon - default to false in HF, but let's use it here
-                noise = (x - alpha ** (0.5) * x_recon) / sqrt_one_minus_alpha
+                # re-derive ε so it stays consistent with the clamped x₀
+                epsilon = (x - alpha ** (0.5) * x_recon) / sqrt_one_minus_alpha
 
         # Clip epsilon for numerical stability in policy gradient - not sure if this is helpful yet, but the value can be huge sometimes. This has no effect if DDPM is used
         if self.use_ddim and self.eps_clip_value is not None:
-            noise.clamp_(-self.eps_clip_value, self.eps_clip_value)
+            epsilon.clamp_(-self.eps_clip_value, self.eps_clip_value)
 
         # Get mu
         if self.use_ddim:
@@ -262,7 +268,7 @@ class DiffusionModel(nn.Module):
             eta=0
             """
             sigma = extract(self.ddim_sigmas, index, x.shape)
-            dir_xt = (1.0 - alpha_prev - sigma**2).sqrt() * noise
+            dir_xt = (1.0 - alpha_prev - sigma**2).sqrt() * epsilon
             mu = (alpha_prev**0.5) * x_recon + dir_xt
             var = sigma**2
             logvar = torch.log(var)
@@ -278,7 +284,7 @@ class DiffusionModel(nn.Module):
         return mu, logvar
 
     @torch.no_grad()
-    def forward(self, cond, deterministic=True):
+    def forward(self, cond, deterministic=True, init_noise=None):
         """
         Forward pass for sampling actions. Used in evaluating pre-trained/fine-tuned policy. Not modifying diffusion clipping
 
@@ -286,6 +292,9 @@ class DiffusionModel(nn.Module):
             cond: dict with key state/rgb; more recent obs at the end
                 state: (B, To, Do)
                 rgb: (B, To, C, H, W)
+            init_noise: optional (B, Ta, Da) initial noise x_T; with DDIM eta=0
+                this makes init_noise -> trajectory deterministic (used by the
+                noise-space steering policy). Defaults to a fresh N(0, I) draw.
         Return:
             Sample: namedtuple with fields:
                 trajectories: (B, Ta, Da)
@@ -295,7 +304,10 @@ class DiffusionModel(nn.Module):
         B = len(sample_data)
 
         # Loop
-        x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
+        if init_noise is not None:
+            x = init_noise.to(device)
+        else:
+            x = torch.randn((B, self.horizon_steps, self.action_dim), device=device)
         if self.use_ddim:
             t_all = self.ddim_t
         else:

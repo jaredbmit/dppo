@@ -29,10 +29,6 @@ exactly the policy's action — so the policy gradient in noise space is clean.
 
 ## Why these choices (the non-obvious bits)
 
-- **State-VALUE critic V(h), not Q(h, w).** Many different `w` decode to the same
-  motion chunk (and reward), so a Q over noise is aliased along those directions
-  and pointless to fit. A state-value critic sidesteps this entirely — which is
-  what lets plain PPO work in noise space.
 - **Init ≈ N(0, I).** The policy's mean head is zero-init and log-std is zero-init,
   so at start `π(w|h) = N(0, I)` for any input — i.e. the steered policy *is* the
   base prior. RL moves it from there.

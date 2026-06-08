@@ -1,33 +1,17 @@
 """Tiny Gaussian noise-steering policy + state-value critic.
 
-Both networks share the same conditioning recipe:
+Both condition on  h = [ frozen history feature ‖ learned goal embedding ]: the
+frozen prior's history embedding (conditioning.py) plus a small goal embedding
+(the goal lives policy-side because the prior is task-agnostic).
 
-    h = [ frozen_history_encoder(state)  ‖  goal_embed(goal) ]
+POLICY  pi(w | h): single forward pass h -> diagonal Gaussian over the flattened
+(Ta*Da) noise w. No denoising-time input / timestep / iteration — not a DiT, stays
+tiny. Init ~N(0, I) (zero-init mean head, log_std 0) so it starts as the base prior.
 
-i.e. the frozen prior's history embedding (see conditioning.py) concatenated with
-a *small learned* embedding of the task goal. The goal lives on the policy side
-because the prior is task-agnostic.
-
-POLICY  pi(w | h):  h -> diagonal Gaussian over the flattened (Ta*Da) noise w.
-  - A single forward pass: conditioning -> distribution over noise. There is NO
-    denoising-time input, no timestep embedding, no iterative refinement. This is
-    NOT a DiT; it must stay tiny (hundreds of K params).
-  - Initialized to output ~N(0, I): the mean head is zero-init (mean ~ 0) and the
-    log-std is zero-init (std ~ 1). At init the steered policy therefore draws
-    standard noise and reproduces the base prior's behavior; RL moves it from
-    there.
-
-CRITIC  V(h):  state-VALUE, not a Q over noise.
-  - A Q(h, w) would hit an aliasing problem: many different noise vectors w decode
-    (through the frozen DDIM map) to the *same* motion chunk and thus the same
-    reward, so Q would have to be constant along those directions — hard to fit
-    and pointless. A state-value V(h) sidesteps this entirely, which is exactly
-    why plain PPO works cleanly in noise space.
+CRITIC  V(h): standard PPO state-value MLP on the same conditioning.
 """
 
 from __future__ import annotations
-
-import math
 
 import torch
 import torch.nn as nn
@@ -77,10 +61,8 @@ class NoisePolicy(nn.Module):
         goal_emb_dim:    width of the learned goal embedding.
         log_std_init:    initial log-std (0.0 -> std 1 -> N(0,I) at init).
 
-    The policy's steering authority (how far the mean drifts from 0) is governed
-    by the KL-to-N(0,I) penalty's `kl_coef` in PPO, not a separate mean gain: with
-    the zero-init mean head the init is N(0,I) regardless, and the KL term already
-    penalizes mu^2, so an extra constant gain on the mean would be redundant.
+    Steering authority (mean drift from 0) is set by PPO's `kl_coef` (the KL term
+    penalizes mu^2); there is deliberately no separate mean-gain knob.
     """
 
     def __init__(
@@ -102,8 +84,7 @@ class NoisePolicy(nn.Module):
         # state-independent log-std (standard for continuous-control PPO)
         self.log_std = nn.Parameter(torch.full((self.noise_dim,), float(log_std_init)))
 
-        # Zero-init the mean head so that, at init, mean(w) == 0 for ANY input ->
-        # combined with log_std=0 the policy is exactly N(0, I) == the base prior.
+        # zero-init -> mean 0 for any input -> with log_std=0, policy == N(0,I) (see above)
         nn.init.zeros_(self.mean_head.weight)
         nn.init.zeros_(self.mean_head.bias)
 
@@ -138,9 +119,8 @@ class NoisePolicy(nn.Module):
     def kl_to_standard_normal(self, cond: dict) -> torch.Tensor:
         """Analytic KL( pi(.|h) || N(0, I) ), per sample (B,).
 
-        Load-bearing, not cosmetic: pulling pi toward N(0,I) keeps w inside the
-        frozen decoder's input distribution AND keeps the autoregressive rollout
-        from drifting off-manifold as steered chunks feed future conditioning.
+        Load-bearing: keeps w in the frozen decoder's input distribution and the AR
+        rollout on-manifold as steered chunks feed future conditioning.
 
         KL = 0.5 * sum_i( sigma_i^2 + mu_i^2 - 1 - log sigma_i^2 ).
         """

@@ -1,20 +1,13 @@
 """Tap the frozen prior's internal history embedding.
 
-The steering policy/critic condition on (motion history, task goal). For the
-*history* we reuse the representation the frozen task-agnostic prior already
-computes — its ``obs_proj`` token embedding — rather than training a second
-encoder over raw observations:
+For the history conditioning we reuse what the frozen task-agnostic prior already
+computes — its ``obs_proj`` token embedding — instead of training a second encoder:
 
-    obs_proj(state) -> per-history-step token embedding  (B, To, d_model)
+    obs_proj(state) -> per-step token embedding  (B, To, d_model)
 
-The *goal* is deliberately NOT handled here: the frozen prior is task-agnostic
-(goal_dim=0, no goal_proj), so the goal is a property of the task/policy, not of
-the prior. The steering policy embeds the goal itself (see policy.py) and
-concatenates it onto this history feature. This is the whole framework: a generic
-state-conditional prior, steered toward a task by a small goal-aware policy.
-
-These projections are frozen and called under no_grad — the policy learns only
-the small heads on top.
+The goal is NOT handled here: the prior is task-agnostic (goal_dim=0), so the goal
+is the policy's concern — it embeds the goal and concatenates it on (see policy.py).
+Frozen, called under no_grad; the policy learns only the heads on top.
 """
 
 from __future__ import annotations

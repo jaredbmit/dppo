@@ -1,10 +1,9 @@
 """Clipped PPO + GAE for the noise-steering policy.
 
-Hand-written CleanRL-style PPO, matching the conventions of DPPO's own
-`agent/finetune/train_ppo_diffusion_agent.py` (manual GAE, `RunningRewardScaler`,
-`reward_scale_const`, critic-warmup, `terminated`-based bootstrap so time-limit
-truncation still bootstraps). DPPO does not use an external RL library, so neither
-do we.
+Hand-written CleanRL-style PPO (DPPO uses no external RL library), matching the
+conventions of DPPO's own `agent/finetune/train_ppo_diffusion_agent.py`: manual GAE,
+`RunningRewardScaler`, `reward_scale_const`, critic-warmup, and a `terminated`-based
+bootstrap so time-limit truncation still bootstraps.
 
 Two noise-space specifics on top of vanilla PPO:
 
@@ -15,8 +14,6 @@ Two noise-space specifics on top of vanilla PPO:
     NoisePolicy.kl_to_standard_normal). This keeps w in the frozen decoder's input
     distribution and keeps the AR rollout on-manifold; its coefficient `kl_coef`
     is the main steering-vs-stay-natural knob.
-
-The critic is a state-value V(h) (see policy.py for why not a Q over noise).
 """
 
 from __future__ import annotations

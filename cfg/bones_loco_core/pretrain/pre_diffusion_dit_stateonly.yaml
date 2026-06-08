@@ -1,0 +1,89 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+
+_target_: agent.pretrain.train_diffusion_agent.TrainDiffusionAgent
+
+# Task-AGNOSTIC motion prior for noise-space steering.
+#
+# Identical to pre_diffusion_dit_goal.yaml except the goal is removed entirely:
+# no XYGoalConditioner and goal_dim=0. This trains a purely state-conditional BC
+# prior  p(future chunk | recent history)  that knows nothing about any task.
+# Downstream tasks (XY goal-following, circle, ...) are handled by a small
+# noise-steering RL policy on TOP of this frozen prior — see
+# model/noise_steering/ and cfg/bones_loco_core/noise_steering/.
+name: bones_loco_core_pre_diffusion_dit_stateonly_ta${horizon_steps}_td${denoising_steps}
+logdir: log/bones_loco_core-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: data/bones_loco_core/train.npz
+
+seed: 42
+device: cuda:0
+obs_dim: 38
+action_dim: 38
+goal_dim: 0          # task-agnostic: no goal conditioning
+horizon_steps: 40
+cond_steps: 1
+denoising_steps: 8
+
+wandb:
+  entity: jaredb-drl
+  project: bones_loco_core-pretrain
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_epochs: 10
+  batch_size: 512
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  lr_scheduler:
+    first_cycle_steps: 12
+    warmup_steps: 0
+    min_lr: 1e-6
+  update_ema_freq: 1
+  save_model_freq: 1
+  log_freq: 1          # per-epoch console summary
+  log_step_freq: 500   # dense logging every 500 grad steps (~17 logs/epoch)
+
+# No goal_conditioner: the prior is goal-free.
+
+model:
+  _target_: model.diffusion.diffusion.DiffusionModel
+  predict_epsilon: False
+  denoised_clip_value: null
+  aux_loss_fn:
+    _target_: model.diffusion.auxiliary_loss.G1GeometricLoss
+    xml_path: /home/jared/drl/LATENT/storage/assets/unitree_g1/scene_mjx_flat_terrain.xml
+    norm_stats_path: data/bones_loco_core/norm_stats.npz
+    lambda_ee_pos: 1.0
+    lambda_joint_vel: 1.0
+  network:
+    _target_: model.diffusion.dit_diffusion.DiffusionDiT
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+    obs_dim: ${obs_dim}
+    cond_steps: ${cond_steps}
+    goal_dim: ${goal_dim}   # 0 -> no goal_proj / null_goal built
+    d_model: 384
+    n_heads: 6
+    n_layers: 6
+    ff_mult: 4
+    dropout: 0.0
+    # no cfg_dropout_prob: there is no goal to drop
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  device: ${device}
+
+ema:
+  decay: 0.999
+
+train_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceDataset
+  dataset_path: ${train_dataset_path}
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  max_n_episodes: 20000
+  device: ${device}

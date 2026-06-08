@@ -1,0 +1,96 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+
+_target_: agent.noise_steering.train_noise_steering_agent.TrainNoiseSteeringAgent
+
+# Latent-noise steering of a FROZEN, task-agnostic motion prior (see
+# model/noise_steering/README.md). The prior is goal-free (goal_dim=0); the XY
+# goal-following task is carried entirely by the small steering policy.
+name: bones_loco_core_steer_xy_goal_ta${horizon_steps}_td${denoising_steps}
+logdir: log/bones_loco_core-noise-steering/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+# Point this at a STATE-ONLY (goal_dim=0) BC prior checkpoint:
+base_prior_path: log/bones_loco_core-pretrain/bones_loco_core_pre_diffusion_dit_stateonly_ta40_td8/PLACEHOLDER/checkpoint/state_10.pt
+
+seed: 42
+device: cuda:0
+obs_dim: 38
+goal_dim: 0          # the PRIOR is goal-free; the task goal is policy-side (2-D)
+action_dim: 38
+denoising_steps: 8
+ddim_steps: 8        # deterministic decoder steps (<= denoising_steps)
+cond_steps: 1
+horizon_steps: 40
+
+wandb:
+  entity: jaredb-drl
+  project: bones_loco_core-noise-steering
+  run: ${now:%H-%M-%S}_${name}
+
+env:
+  n_envs: 256
+  name: bones_loco_core_goal_reaching
+  env_type: g1_kinematic
+  max_episode_steps: 1000
+  specific:
+    norm_stats_path: data/bones_loco_core/norm_stats.npz
+    dataset_path: data/bones_loco_core/train.npz
+
+train:
+  n_train_itr: 500
+  n_steps: 16                 # chunks collected per env per iteration
+  n_critic_warmup_itr: 5
+  save_model_freq: 50
+  # PPO
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  update_epochs: 4
+  num_minibatches: 4
+  vf_coef: 0.5
+  ent_coef: 0.0
+  kl_coef: 0.1               # KL(pi || N(0,I)); main steer-vs-stay-natural knob
+  max_grad_norm: 0.5
+  target_kl: 0.05
+  reward_scale_running: True
+  reward_scale_const: 1.0
+  actor_lr: 3e-4
+  critic_lr: 1e-3
+
+# Small policy/critic head hyperparameters (the noise policy is built at runtime
+# on top of the frozen history tap, so these are plain values, not a _target_).
+model:
+  hidden: 256
+  goal_emb_dim: 64
+  log_std_init: 0.0           # 0.0 -> std 1 -> N(0,I) at init
+  # steering authority (mean drift from 0) is governed by train.kl_coef, not a
+  # separate mean gain (the KL term already penalizes mu^2).
+
+# Frozen prior: deterministic DDIM (eta=0 hardcoded in DiffusionModel). Loads the
+# state-only checkpoint's EMA weights via network_path.
+prior:
+  _target_: model.diffusion.diffusion.DiffusionModel
+  predict_epsilon: False
+  denoised_clip_value: null
+  use_ddim: True
+  ddim_steps: ${ddim_steps}
+  network_path: ${base_prior_path}
+  network:
+    _target_: model.diffusion.dit_diffusion.DiffusionDiT
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+    obs_dim: ${obs_dim}
+    cond_steps: ${cond_steps}
+    goal_dim: 0
+    d_model: 384
+    n_heads: 6
+    n_layers: 6
+    ff_mult: 4
+    dropout: 0.0
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  denoising_steps: ${denoising_steps}
+  device: ${device}

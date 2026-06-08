@@ -16,7 +16,7 @@ obs_dim: 38
 goal_dim: 2
 action_dim: 38
 denoising_steps: 8
-ft_denoising_steps: 8
+ft_denoising_steps: 4
 cond_steps: 1
 horizon_steps: 40
 act_steps: 40
@@ -42,23 +42,23 @@ env:
     act_steps: ${act_steps}
 
 train:
-  n_train_itr: 1000
-  n_critic_warmup_itr: 50
-  n_steps: 1
+  n_train_itr: 500
+  n_critic_warmup_itr: 5
+  n_steps: 4
   gamma: 0.99
-  actor_lr: 1e-5
+  actor_lr: 1e-4
   actor_weight_decay: 0
   actor_lr_scheduler:
     first_cycle_steps: 1000
     warmup_steps: 10
-    min_lr: 1e-5
+    min_lr: 1e-4
   critic_lr: 1e-3
   critic_weight_decay: 0
   critic_lr_scheduler:
     first_cycle_steps: 1000
     warmup_steps: 10
     min_lr: 1e-3
-  save_model_freq: 300
+  save_model_freq: 50
   val_freq: 10
   log_freq: 1
   render:
@@ -68,13 +68,13 @@ train:
   reward_scale_running: True
   reward_scale_const: 1.0
   gae_lambda: 0.95
-  batch_size: 256
-  update_epochs: 1
+  batch_size: 512
+  update_epochs: 2
   vf_coef: 0.5
   target_kl: 1
   logprob_batch_size: 256
   use_bc_loss: True
-  bc_loss_coeff: 0.1
+  bc_loss_coeff: 0.01
 
 model:
   _target_: model.diffusion.diffusion_ppo.PPODiffusion

@@ -154,6 +154,7 @@ class NoiseSteeringPPO:
             "obs": {k: v.reshape(S * N, *v.shape[2:]) for k, v in obs_buf.items()},
             "acts": acts.reshape(S * N, self.noise_dim),
             "logps": logps.reshape(S * N),
+            "vals": to_t(vals).reshape(S * N),
             "advs": to_t(adv).reshape(S * N),
             "returns": to_t(returns).reshape(S * N),
         }
@@ -175,7 +176,37 @@ class NoiseSteeringPPO:
         if self.norm_adv:
             advs = (advs - advs.mean()) / (advs.std() + 1e-8)
 
-        logs = {}
+        # ---- Critic: always runs all update_epochs regardless of actor KL ----
+        v_loss_last = 0.0
+        for epoch in range(self.update_epochs):
+            np.random.shuffle(idxs)
+            for start in range(0, B, mb_size):
+                mb = idxs[start:start + mb_size]
+                mb_obs = self._slice_obs(batch["obs"], mb)
+                mb_ret = batch["returns"][mb]
+                mb_old_val = batch["vals"][mb]
+
+                new_val = self.critic(mb_obs)
+                # Value clipping: prevents runaway updates when critic lags
+                v_unclipped = (new_val - mb_ret).pow(2)
+                v_clipped_est = mb_old_val + torch.clamp(
+                    new_val - mb_old_val, -self.clip_coef, self.clip_coef
+                )
+                v_clipped = (v_clipped_est - mb_ret).pow(2)
+                v_loss = 0.5 * torch.max(v_unclipped, v_clipped).mean()
+
+                self.critic_opt.zero_grad()
+                (self.vf_coef * v_loss).backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+                self.critic_opt.step()
+                v_loss_last = v_loss.item()
+
+        logs = {"loss/value": v_loss_last}
+        if not update_actor:
+            return logs
+
+        # ---- Actor: early-stopped independently of critic ----
+        pg_loss_last = entropy_last = kl_prior_last = approx_kl_last = 0.0
         for epoch in range(self.update_epochs):
             np.random.shuffle(idxs)
             approx_kls = []
@@ -185,52 +216,44 @@ class NoiseSteeringPPO:
                 mb_acts = batch["acts"][mb]
                 mb_old_logp = batch["logps"][mb]
                 mb_adv = advs[mb]
-                mb_ret = batch["returns"][mb]
 
-                # critic
-                new_val = self.critic(mb_obs)
-                v_loss = 0.5 * (new_val - mb_ret).pow(2).mean()
-                self.critic_opt.zero_grad()
-                (self.vf_coef * v_loss).backward()
-                nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-                self.critic_opt.step()
+                new_logp, entropy = self.policy.evaluate(mb_obs, mb_acts)
+                kl_prior = self.policy.kl_to_standard_normal(mb_obs)
 
-                # actor (skipped during critic warmup)
-                if update_actor:
-                    new_logp, entropy = self.policy.evaluate(mb_obs, mb_acts)
-                    kl_prior = self.policy.kl_to_standard_normal(mb_obs)  # to N(0,I)
+                logratio = new_logp - mb_old_logp
+                ratio = logratio.exp()
+                with torch.no_grad():
+                    approx_kls.append(((ratio - 1) - logratio).mean().item())
 
-                    logratio = new_logp - mb_old_logp
-                    ratio = logratio.exp()
-                    with torch.no_grad():
-                        approx_kls.append(((ratio - 1) - logratio).mean().item())
+                pg1 = -mb_adv * ratio
+                pg2 = -mb_adv * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
+                pg_loss = torch.max(pg1, pg2).mean()
 
-                    pg1 = -mb_adv * ratio
-                    pg2 = -mb_adv * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
-                    pg_loss = torch.max(pg1, pg2).mean()
+                actor_loss = (pg_loss
+                              - self.ent_coef * entropy.mean()
+                              + self.kl_coef * kl_prior.mean())
+                self.actor_opt.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.actor_opt.step()
 
-                    actor_loss = (pg_loss
-                                  - self.ent_coef * entropy.mean()
-                                  + self.kl_coef * kl_prior.mean())
-                    self.actor_opt.zero_grad()
-                    actor_loss.backward()
-                    nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                    self.actor_opt.step()
+                pg_loss_last    = pg_loss.item()
+                entropy_last    = entropy.mean().item()
+                kl_prior_last   = kl_prior.mean().item()
+                approx_kl_last  = approx_kls[-1]
 
-                    logs = {
-                        "loss/policy": pg_loss.item(),
-                        "loss/value": v_loss.item(),
-                        "loss/entropy": entropy.mean().item(),
-                        "loss/kl_to_prior": kl_prior.mean().item(),
-                        "policy/approx_kl": approx_kls[-1],
-                        "policy/log_std_mean": self.policy.log_std.mean().item(),
-                    }
-                else:
-                    logs = {"loss/value": v_loss.item()}
-            if (update_actor and self.target_kl is not None
+            if (self.target_kl is not None
                     and len(approx_kls) and np.mean(approx_kls) > self.target_kl):
                 logs["policy/early_stop_epoch"] = epoch
                 break
+
+        logs.update({
+            "loss/policy":          pg_loss_last,
+            "loss/entropy":         entropy_last,
+            "loss/kl_to_prior":     kl_prior_last,
+            "policy/approx_kl":     approx_kl_last,
+            "policy/log_std_mean":  self.policy.log_std.mean().item(),
+        })
         return logs
 
     # ------------------------------------------------------------------ #

@@ -20,7 +20,9 @@ obs_dim: 38
 goal_dim: 0          # the PRIOR is goal-free; the task goal is policy-side (2-D)
 action_dim: 38
 denoising_steps: 8
-ddim_steps: 8        # deterministic decoder steps (<= denoising_steps)
+ddim_steps: 4        # deterministic decoder steps (<= denoising_steps)
+compile_prior: true  # torch.compile the frozen DiT (~30 s warmup, then faster)
+use_bf16: true       # bf16 autocast for the frozen DDIM decode (~2x speedup)
 cond_steps: 1
 horizon_steps: 40
 
@@ -30,7 +32,7 @@ wandb:
   run: ${now:%H-%M-%S}_${name}
 
 env:
-  n_envs: 4096
+  n_envs: 8192
   name: bones_loco_core_goal_reaching
   env_type: g1_kinematic
   max_episode_steps: 200   # 5 chunks × 40 steps; one episode = ~4.0 s at 50 Hz
@@ -38,7 +40,7 @@ env:
     norm_stats_path: data/bones_loco_core/norm_stats.npz
     dataset_path: data/bones_loco_core/train.npz
     goal_sampling: isotropic   # uniform random direction; "empirical" uses the dataset goal bank
-    goal_radius: 3.0           # target distance in meters (isotropic only)
+    goal_radius: 2.5           # target distance in meters (isotropic only)
 
 train:
   n_train_itr: 500

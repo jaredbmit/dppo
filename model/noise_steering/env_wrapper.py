@@ -37,12 +37,13 @@ class NoiseSteeringEnv:
         device: torch device for noise / decoding.
     """
 
-    def __init__(self, venv, prior, device: str = "cuda:0"):
+    def __init__(self, venv, prior, device: str = "cuda:0", use_bf16: bool = False):
         self.venv = venv
         self.prior = prior
         self.device = device
         self.n_envs = venv.n_envs
         self.noise_shape = (prior.horizon_steps, prior.action_dim)
+        self.use_bf16 = use_bf16
 
     # ------------------------------------------------------------------ #
 
@@ -58,6 +59,10 @@ class NoiseSteeringEnv:
         goal is never passed to the decoder.
         """
         cond = {"state": obs["state"]}
+        if self.use_bf16:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                chunk = self.prior.forward(cond, init_noise=w).trajectories
+            return chunk.float().detach().cpu().numpy().astype(np.float32)
         chunk = self.prior.forward(cond, init_noise=w).trajectories  # (B,Ta,Da)
         return chunk.detach().cpu().numpy().astype(np.float32)
 

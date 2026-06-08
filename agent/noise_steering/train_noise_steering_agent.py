@@ -41,6 +41,11 @@ class TrainNoiseSteeringAgent:
         )
         for p in self.prior.parameters():
             p.requires_grad_(False)
+        if cfg.get("compile_prior", False):
+            self.prior.network = torch.compile(
+                self.prior.network, mode="reduce-overhead", fullgraph=False
+            )
+            log.info("torch.compile enabled on frozen prior (~30 s warmup on first batch)")
 
         # --- underlying task env (chunk actions); one chunk == one RL step ---
         self.venv = G1KinematicVecEnv(
@@ -56,7 +61,10 @@ class TrainNoiseSteeringAgent:
             act_steps=cfg.horizon_steps,
         )
         self.venv.seed(cfg.seed)
-        self.env = NoiseSteeringEnv(self.venv, self.prior, device=self.device)
+        self.env = NoiseSteeringEnv(
+            self.venv, self.prior, device=self.device,
+            use_bf16=cfg.get("use_bf16", False),
+        )
 
         # --- tiny goal-aware policy + state-value critic on the frozen tap ---
         enc = FrozenHistoryEncoder(self.prior.network, cond_steps=cfg.cond_steps)

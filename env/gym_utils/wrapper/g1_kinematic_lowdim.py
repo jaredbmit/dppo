@@ -66,13 +66,19 @@ class G1KinematicEnv(gym.Env):
         max_episode_steps: int = 1000,
         min_height: float = 0.3,
         goal_range: float = 2.0,
+        goal_scale: float = 1.0,
+        goal_sampling: str = "empirical",
+        goal_radius: float = 2.5,
     ):
         super().__init__()
 
         self.horizon_steps = horizon_steps
         self.max_episode_steps = max_episode_steps
         self.min_height = min_height
-        self.goal_range = goal_range  # retained for cfg compat; unused (empirical sampler)
+        self.goal_range = goal_range  # retained for cfg compat; unused
+        self.goal_scale = goal_scale
+        self.goal_sampling = goal_sampling
+        self.goal_radius = goal_radius
 
         stats = np.load(norm_stats_path)
         self._mean = stats["mean"].astype(np.float32)   # (38,)
@@ -81,10 +87,11 @@ class G1KinematicEnv(gym.Env):
         data = np.load(dataset_path)
         self._states = data["states"].astype(np.float32)  # (N, 38) normalized
 
-        # Goals are sampled to match the measured hindsight-goal distribution
-        # (anisotropic, horizon-dependent) rather than an isotropic disk.
-        bank, cov = load_or_build_goal_bank(dataset_path, horizon_steps)
-        self._goal_sampler = GoalBankSampler(bank, cov)
+        if goal_sampling == "empirical":
+            bank, cov = load_or_build_goal_bank(dataset_path, horizon_steps)
+            self._goal_sampler = GoalBankSampler(bank, cov)
+        else:
+            self._goal_sampler = None
 
         obs_dim  = self._mean.shape[0]   # 38
         goal_dim = 2
@@ -98,9 +105,8 @@ class G1KinematicEnv(gym.Env):
         self._current_obs    = np.zeros(obs_dim,  dtype=np.float32)
         self._goal           = np.zeros(goal_dim, dtype=np.float32)
         self._chunk_xy       = np.zeros(2,        dtype=np.float32)
-        self._chunk_rel_yaw  = 0.0   # yaw accumulated from chunk start (rad)
+        self._chunk_rel_yaw  = 0.0   # yaw accumulated from episode start (rad)
         self._step_count     = 0
-        self._goal_step      = 0
 
     # ---------------------------------------------------------------------- #
     # Gym interface
@@ -119,7 +125,6 @@ class G1KinematicEnv(gym.Env):
         self._current_obs = self._states[idx].copy()
 
         self._step_count    = 0
-        self._goal_step     = 0
         self._chunk_xy[:]   = 0.0
         self._chunk_rel_yaw = 0.0
         self._goal          = self._sample_goal()
@@ -157,9 +162,8 @@ class G1KinematicEnv(gym.Env):
         # Advance state
         self._current_obs = action.astype(np.float32)
         self._step_count  += 1
-        self._goal_step   += 1
 
-        # Reward: negative distance from accumulated displacement to goal
+        # Reward: negative distance from episode-cumulative displacement to goal
         dist   = float(np.linalg.norm(self._chunk_xy - self._goal))
         reward = -dist
 
@@ -169,15 +173,10 @@ class G1KinematicEnv(gym.Env):
         done = bool(float(height) < self.min_height
                     or self._step_count >= self.max_episode_steps)
 
-        # Resample goal each horizon_steps
-        if self._goal_step >= self.horizon_steps:
-            self._goal          = self._sample_goal()
-            self._chunk_xy[:]   = 0.0
-            self._chunk_rel_yaw = 0.0
-            self._goal_step     = 0
-
+        # Goal observation: remaining displacement to episode goal
+        remaining = (self._goal - self._chunk_xy).astype(np.float32)
         info = {"dist_to_goal": dist, "height": float(height)}
-        return {"state": self._current_obs.copy(), "goal": self._goal.copy()}, reward, done, info
+        return {"state": self._current_obs.copy(), "goal": remaining}, reward, done, info
 
     def render(self, mode="human"):
         pass
@@ -187,8 +186,13 @@ class G1KinematicEnv(gym.Env):
     # ---------------------------------------------------------------------- #
 
     def _sample_goal(self) -> np.ndarray:
-        """Sample a body-frame XY displacement matching the measured goal distribution."""
-        return self._goal_sampler.sample(1)[0]
+        if self.goal_sampling == "isotropic":
+            # filled disk: r = R*sqrt(U) is uniform over area (not a thin ring),
+            # so episodes span all distances 0..goal_radius for an easy-goal floor.
+            theta = np.random.uniform(-np.pi, np.pi)
+            r = self.goal_radius * np.sqrt(np.random.uniform())
+            return np.array([r * np.cos(theta), r * np.sin(theta)], dtype=np.float32)
+        return self._goal_sampler.sample(1)[0] * self.goal_scale
 
 
 class G1KinematicVecEnv:
@@ -216,6 +220,9 @@ class G1KinematicVecEnv:
         max_episode_steps: int = 1000,
         min_height: float = 0.3,
         goal_range: float = 2.0,
+        goal_scale: float = 1.0,
+        goal_sampling: str = "empirical",
+        goal_radius: float = 2.5,
         n_obs_steps: int = 1,
         act_steps: int = 50,
     ):
@@ -223,7 +230,10 @@ class G1KinematicVecEnv:
         self.horizon_steps    = horizon_steps
         self.max_episode_steps = max_episode_steps
         self.min_height       = min_height
-        self.goal_range       = goal_range  # retained for cfg compat; unused (empirical sampler)
+        self.goal_range       = goal_range  # retained for cfg compat; unused
+        self.goal_scale       = goal_scale
+        self.goal_sampling    = goal_sampling
+        self.goal_radius      = goal_radius
         self.n_obs_steps      = n_obs_steps
         self.act_steps        = act_steps
 
@@ -233,10 +243,11 @@ class G1KinematicVecEnv:
 
         self._dataset = np.load(dataset_path)["states"].astype(np.float32)  # (D, obs_dim)
 
-        # Goals match the measured hindsight-goal distribution (anisotropic,
-        # horizon-dependent), not an isotropic disk. Built/cached per horizon.
-        bank, cov = load_or_build_goal_bank(dataset_path, horizon_steps)
-        self._goal_sampler = GoalBankSampler(bank, cov)
+        if goal_sampling == "empirical":
+            bank, cov = load_or_build_goal_bank(dataset_path, horizon_steps)
+            self._goal_sampler = GoalBankSampler(bank, cov)
+        else:
+            self._goal_sampler = None
 
         self.obs_dim  = self._mean.shape[0]   # 38
         self.goal_dim = 2
@@ -247,7 +258,6 @@ class G1KinematicVecEnv:
         self._chunk_xy      = np.zeros((n_envs, 2),             dtype=np.float32)
         self._chunk_rel_yaw = np.zeros(n_envs,                  dtype=np.float32)
         self._step_count    = np.zeros(n_envs,                  dtype=np.int32)
-        self._goal_step     = np.zeros(n_envs,                  dtype=np.int32)
 
         # Obs history: (N, n_obs_steps, dim) — rolling buffer for cond stacking.
         self._obs_hist  = np.zeros((n_envs, n_obs_steps, self.obs_dim),  dtype=np.float32)
@@ -260,6 +270,7 @@ class G1KinematicVecEnv:
 
     def reset(self) -> dict:
         self._reset_envs(np.ones(self.n_envs, dtype=bool))
+        # _chunk_xy is 0 after reset, so remaining == goal
         return {"state": self._obs_hist.copy(), "goal": self._goal.copy()}
 
     def step(self, actions: np.ndarray):
@@ -294,9 +305,8 @@ class G1KinematicVecEnv:
             # Kinematic transition: predicted obs becomes new state
             np.copyto(self._obs, actions[:, t])
             self._step_count += 1
-            self._goal_step  += 1
 
-            # Reward: negative distance at the final inner step only
+            # Reward: negative distance from episode-cumulative displacement to goal
             if t == self.act_steps - 1:
                 reward = -np.linalg.norm(self._chunk_xy - self._goal, axis=1)
 
@@ -305,14 +315,6 @@ class G1KinematicVecEnv:
                       + self._mean[IDX_HEIGHT])
             terminated |= height < self.min_height
             truncated  |= self._step_count >= self.max_episode_steps
-
-            # Per-env goal resampling at horizon boundary
-            goal_mask = self._goal_step >= self.horizon_steps
-            if goal_mask.any():
-                self._goal[goal_mask]           = self._sample_goals(int(goal_mask.sum()))
-                self._chunk_xy[goal_mask]       = 0.0
-                self._chunk_rel_yaw[goal_mask]  = 0.0
-                self._goal_step[goal_mask]      = 0
 
             # Roll obs history and append latest
             if self.n_obs_steps > 1:
@@ -324,8 +326,11 @@ class G1KinematicVecEnv:
         if done.any():
             self._reset_envs(done)
 
+        # Goal observation: remaining displacement to episode goal.
+        # For just-reset envs _chunk_xy is 0, so they get the full goal.
+        remaining = (self._goal - self._chunk_xy).astype(np.float32)
         return (
-            {"state": self._obs_hist.copy(), "goal": self._goal.copy()},
+            {"state": self._obs_hist.copy(), "goal": remaining},
             reward,
             terminated,
             truncated,
@@ -358,7 +363,6 @@ class G1KinematicVecEnv:
         idx = np.random.randint(0, len(self._dataset), size=n)
         self._obs[mask]           = self._dataset[idx]
         self._step_count[mask]    = 0
-        self._goal_step[mask]     = 0
         self._chunk_xy[mask]      = 0.0
         self._chunk_rel_yaw[mask] = 0.0
         self._goal[mask]          = self._sample_goals(n)
@@ -366,4 +370,10 @@ class G1KinematicVecEnv:
         self._obs_hist[mask]  = self._obs[mask,  None, :]   # broadcasts over n_obs_steps
 
     def _sample_goals(self, n: int) -> np.ndarray:
-        return self._goal_sampler.sample(n)
+        if self.goal_sampling == "isotropic":
+            # filled disk: r = R*sqrt(U) is uniform over area (not a thin ring),
+            # so episodes span all distances 0..goal_radius for an easy-goal floor.
+            theta = np.random.uniform(-np.pi, np.pi, n).astype(np.float32)
+            r = self.goal_radius * np.sqrt(np.random.uniform(size=n)).astype(np.float32)
+            return np.stack([r * np.cos(theta), r * np.sin(theta)], axis=-1)
+        return self._goal_sampler.sample(n) * self.goal_scale

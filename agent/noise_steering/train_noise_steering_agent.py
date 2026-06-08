@@ -49,6 +49,9 @@ class TrainNoiseSteeringAgent:
             dataset_path=cfg.env.specific.dataset_path,
             horizon_steps=cfg.horizon_steps,
             max_episode_steps=cfg.env.max_episode_steps,
+            goal_scale=cfg.env.specific.get("goal_scale", 1.0),
+            goal_sampling=cfg.env.specific.get("goal_sampling", "empirical"),
+            goal_radius=cfg.env.specific.get("goal_radius", 2.5),
             n_obs_steps=cfg.cond_steps,
             act_steps=cfg.horizon_steps,
         )
@@ -62,12 +65,13 @@ class TrainNoiseSteeringAgent:
             enc,
             noise_shape=self.env.noise_shape,
             goal_dim=goal_dim,
-            hidden=cfg.model.hidden,
+            hidden=cfg.model.policy_hidden,
             goal_emb_dim=cfg.model.goal_emb_dim,
             log_std_init=cfg.model.log_std_init,
         ).to(self.device)
         self.critic = ValueCritic(
-            enc, goal_dim=goal_dim, hidden=cfg.model.hidden,
+            enc, goal_dim=goal_dim,
+            hidden=cfg.model.get("critic_hidden", cfg.model.policy_hidden),
             goal_emb_dim=cfg.model.goal_emb_dim,
         ).to(self.device)
         log.info(

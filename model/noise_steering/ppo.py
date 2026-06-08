@@ -157,7 +157,11 @@ class NoiseSteeringPPO:
             "advs": to_t(adv).reshape(S * N),
             "returns": to_t(returns).reshape(S * N),
         }
-        stats = {"rollout/mean_reward": float(np.mean(ep_rew))}
+        stats = {
+            "rollout/mean_reward": float(np.mean(ep_rew)),
+            "rollout/adv_std":     float(adv.std()),    # near-0 -> advantage collapse
+            "rollout/returns_std": float(returns.std()),
+        }
         return batch, obs, stats
 
     # ------------------------------------------------------------------ #
@@ -219,6 +223,7 @@ class NoiseSteeringPPO:
                         "loss/entropy": entropy.mean().item(),
                         "loss/kl_to_prior": kl_prior.mean().item(),
                         "policy/approx_kl": approx_kls[-1],
+                        "policy/log_std_mean": self.policy.log_std.mean().item(),
                     }
                 else:
                     logs = {"loss/value": v_loss.item()}
@@ -240,7 +245,11 @@ class NoiseSteeringPPO:
             logs["iter"] = it
             log.info(
                 f"itr {it}: reward {roll_stats['rollout/mean_reward']:.4f} "
+                f"| adv_std {roll_stats['rollout/adv_std']:.4f} "
                 f"| pg {logs.get('loss/policy', 0):.4f} "
+                f"| vf {logs.get('loss/value', 0):.4f} "
+                f"| ent {logs.get('loss/entropy', 0):.2f} "
+                f"| log_std {logs.get('policy/log_std_mean', 0):.3f} "
                 f"| klN(0,I) {logs.get('loss/kl_to_prior', 0):.3f} "
                 f"| approx_kl {logs.get('policy/approx_kl', 0):.4f}"
                 f"{'' if update_actor else '  [critic warmup]'}"
